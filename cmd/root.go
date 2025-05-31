@@ -24,6 +24,11 @@ func main() {
 
 func init() {
 	rootCmd.SetHelpCommand(&cobra.Command{Hidden: true})
-	rootCmd.PersistentFlags().StringVar(&subscriptionID, "subscription", "", "Azure subscription ID (or set AZURE_SUBSCRIPTION_ID)")
-	_ = rootCmd.MarkPersistentFlagRequired("subscription")
+	// Set subscriptionID from env if present
+	if v := os.Getenv("K3A_SUBSCRIPTION"); v != "" {
+		subscriptionID = v
+	}
+	rootCmd.PersistentFlags().StringVar(&subscriptionID, "subscription", subscriptionID, "Azure subscription ID (or set K3A_SUBSCRIPTION)")
+	// Register kubeconfig command
+	// (init() in kubeconfig.go will also add it, but this ensures it's loaded)
 }

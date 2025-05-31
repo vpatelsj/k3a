@@ -4,20 +4,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"os"
 	"text/template"
-	"time"
+	"embed"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
-	"github.com/jwilder/k3a/pkg/bicep"
+	"github.com/jwilder/k3a/pkg/spinner"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
-	"github.com/urfave/cli/v2"
 )
 
 type CreatePoolArgs struct {
@@ -28,13 +26,109 @@ type CreatePoolArgs struct {
 	Name           string
 	SSHKeyPath     string
 	InstanceCount  int
+	K8sVersion     string // New field for Kubernetes version
+}
+
+//go:embed cloud-init.yaml
+var cloudInitFS embed.FS
+
+// getCloudInitData renders the cloud-init template and returns base64-encoded data
+func getCloudInitData(tmplData map[string]string) (string, error) {
+	cloudInitBytes, err := cloudInitFS.ReadFile("cloud-init.yaml")
+	if err != nil {
+		return "", fmt.Errorf("failed to read embedded cloud-init.yaml: %w", err)
+	}
+	tmpl, err := template.New("cloud-init").Parse(string(cloudInitBytes))
+	if err != nil {
+		return "", fmt.Errorf("failed to parse cloud-init template: %w", err)
+	}
+	var renderedCloudInit bytes.Buffer
+	if err := tmpl.Execute(&renderedCloudInit, tmplData); err != nil {
+		return "", fmt.Errorf("failed to render cloud-init template: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(renderedCloudInit.Bytes()), nil
+}
+
+// getManagedIdentity fetches the managed identity resource
+func getManagedIdentity(ctx context.Context, subscriptionID, cluster string, cred *azidentity.DefaultAzureCredential) (*armmsi.Identity, error) {
+	msiClient, err := armmsi.NewUserAssignedIdentitiesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create managed identity client: %w", err)
+	}
+	msiName := "k3a-msi"
+	msi, err := msiClient.Get(ctx, cluster, msiName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get managed identity: %w", err)
+	}
+	return &msi.Identity, nil
+}
+
+// getSubnet fetches the subnet resource
+func getSubnet(ctx context.Context, subscriptionID, cluster, vnetName string, cred *azidentity.DefaultAzureCredential) (*armnetwork.Subnet, error) {
+	subnetClient, err := armnetwork.NewSubnetsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create subnet client: %w", err)
+	}
+	subnet, err := subnetClient.Get(ctx, cluster, vnetName, "default", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get subnet: %w", err)
+	}
+	return &subnet.Subnet, nil
+}
+
+// getLoadBalancerPools fetches backend and inbound NAT pools for control plane
+func getLoadBalancerPools(ctx context.Context, subscriptionID, cluster, lbName string, cred *azidentity.DefaultAzureCredential) ([]*armcompute.SubResource, []*armcompute.SubResource, error) {
+	lbClient, err := armnetwork.NewLoadBalancersClient(subscriptionID, cred, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create load balancer client: %w", err)
+	}
+	lb, err := lbClient.Get(ctx, cluster, lbName, nil)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to get load balancer: %w", err)
+	}
+	var backendPools []*armcompute.SubResource
+	var inboundNatPools []*armcompute.SubResource
+	if lb.Properties != nil && lb.Properties.BackendAddressPools != nil && len(lb.Properties.BackendAddressPools) > 0 {
+		backendPools = []*armcompute.SubResource{{ID: lb.Properties.BackendAddressPools[0].ID}}
+	}
+	if lb.Properties != nil && lb.Properties.InboundNatPools != nil && len(lb.Properties.InboundNatPools) > 0 {
+		inboundNatPools = []*armcompute.SubResource{{ID: lb.Properties.InboundNatPools[0].ID}}
+	}
+	return backendPools, inboundNatPools, nil
+}
+
+// getSSHKey reads the SSH public key from the given path
+func getSSHKey(sshKeyPath string) (string, error) {
+	if (sshKeyPath == "") {
+		sshKeyPath = os.ExpandEnv("$HOME/.ssh/id_rsa.pub")
+	}
+	sshKeyBytes, err := os.ReadFile(sshKeyPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to read SSH public key from %s: %w", sshKeyPath, err)
+	}
+	return string(sshKeyBytes), nil
+}
+
+// getPublicIP fetches the external IP address for the given public IP resource
+func getPublicIP(ctx context.Context, subscriptionID, cluster, publicIPName string, cred *azidentity.DefaultAzureCredential) (string, error) {
+	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create public IP client: %w", err)
+	}
+	publicIPResp, err := publicIPClient.Get(ctx, cluster, publicIPName, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get public IP '%s': %w", publicIPName, err)
+	}
+	if publicIPResp.PublicIPAddress.Properties != nil && publicIPResp.PublicIPAddress.Properties.IPAddress != nil {
+		return *publicIPResp.PublicIPAddress.Properties.IPAddress, nil
+	}
+	return "", fmt.Errorf("could not determine external IP for public IP resource '%s'", publicIPName)
 }
 
 func Create(args CreatePoolArgs) error {
 	subscriptionID := args.SubscriptionID
 	cluster := args.Cluster
 	location := args.Location
-	bicepFile := "pool.bicep"
 	role := args.Role
 	if role != "" && role != "control-plane" && role != "worker" {
 		return fmt.Errorf("invalid role: %s (must be 'control-plane' or 'worker')", role)
@@ -79,48 +173,17 @@ func Create(args CreatePoolArgs) error {
 		}
 	}
 
-	sshKeyPath := args.SSHKeyPath
-	if sshKeyPath == "" {
-		sshKeyPath = os.ExpandEnv("$HOME/.ssh/id_rsa.pub")
-	}
-	sshKeyBytes, err := os.ReadFile(sshKeyPath)
+	sshKey, err := getSSHKey(args.SSHKeyPath)
 	if err != nil {
-		return fmt.Errorf("failed to read SSH public key from %s: %w", sshKeyPath, err)
-	}
-	sshKey := string(sshKeyBytes)
-
-	bicepTmpl, err := bicep.CompileBicep(bicepFile)
-	if err != nil {
-		return fmt.Errorf("failed to compile bicep file: %w", err)
-	}
-
-	var b map[string]interface{}
-	if err := json.Unmarshal(bicepTmpl, &b); err != nil {
-		return fmt.Errorf("Failed to parse template JSON: %v", err)
+		return err
 	}
 
 	clusterHash := kstrings.UniqueString(cluster)
 
-	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create public IP client: %w", err)
-	}
 	publicIPName := fmt.Sprintf("k3alb%s-publicip", clusterHash)
-	publicIPResp, err := publicIPClient.Get(ctx, cluster, publicIPName, nil)
+	externalIP, err := getPublicIP(ctx, subscriptionID, cluster, publicIPName, cred)
 	if err != nil {
-		return fmt.Errorf("failed to get public IP '%s': %w", publicIPName, err)
-	}
-	externalIP := ""
-	if publicIPResp.PublicIPAddress.Properties != nil && publicIPResp.PublicIPAddress.Properties.IPAddress != nil {
-		externalIP = *publicIPResp.PublicIPAddress.Properties.IPAddress
-	}
-	if externalIP == "" {
-		return fmt.Errorf("could not determine external IP for public IP resource '%s'", publicIPName)
-	}
-
-	cloudInitBytes, err := os.ReadFile("modules/cloud-init.yaml")
-	if err != nil {
-		return fmt.Errorf("failed to read cloud-init.yaml: %w", err)
+		return err
 	}
 
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
@@ -135,18 +198,13 @@ func Create(args CreatePoolArgs) error {
 		"StorageAccountName": storageAccountName,
 		"ResourceGroup":      cluster,
 		"ExternalIP":         externalIP,
+		"K8sVersion":         args.K8sVersion, // Pass version to template
 	}
 
-	tmpl, err := template.New("cloud-init").Parse(string(cloudInitBytes))
+	customDataB64, err := getCloudInitData(tmplData)
 	if err != nil {
-		return fmt.Errorf("failed to parse cloud-init template: %w", err)
+		return err
 	}
-	var renderedCloudInit bytes.Buffer
-	if err := tmpl.Execute(&renderedCloudInit, tmplData); err != nil {
-		return fmt.Errorf("failed to render cloud-init template: %w", err)
-	}
-
-	customDataB64 := base64.StdEncoding.EncodeToString(renderedCloudInit.Bytes())
 
 	isControlPlane := false
 	if role == "control-plane" {
@@ -155,66 +213,124 @@ func Create(args CreatePoolArgs) error {
 
 	instanceCount := args.InstanceCount
 
-	parameters := map[string]interface{}{
-		"prefix":         map[string]interface{}{"value": "k3a"},
-		"location":       map[string]interface{}{"value": location},
-		"poolName":       map[string]interface{}{"value": args.Name},
-		"isControlPlane": map[string]interface{}{"value": isControlPlane},
-		"role":           map[string]interface{}{"value": role},
-		"sshPublicKey":   map[string]interface{}{"value": sshKey},
-		"clusterHash":    map[string]interface{}{"value": clusterHash},
-		"customData":     map[string]interface{}{"value": customDataB64},
-		"instanceCount":  map[string]interface{}{"value": instanceCount},
-	}
-
-	cred, err = azidentity.NewDefaultAzureCredential(nil)
+	// Reference existing resources
+	msi, err := getManagedIdentity(ctx, subscriptionID, cluster, cred)
 	if err != nil {
-		return fmt.Errorf("failed to get credentials: %w", err)
+		return err
 	}
 
-	ctx = context.Background()
-	deploymentsClient, err := armresources.NewDeploymentsClient(subscriptionID, cred, nil)
+	vnetName := "k3a-vnet"
+
+	subnet, err := getSubnet(ctx, subscriptionID, cluster, vnetName, cred)
 	if err != nil {
-		return fmt.Errorf("failed to create deployments client: %w", err)
+		return err
 	}
 
-	deploymentName := fmt.Sprintf("pool-deploy-%d", time.Now().Unix())
+	// Prepare VMSS parameters
+	var backendPools []*armcompute.SubResource
+	var inboundNatPools []*armcompute.SubResource
+	lbName := fmt.Sprintf("k3alb%s", clusterHash)
+	backendPools, inboundNatPools, err = getLoadBalancerPools(ctx, subscriptionID, cluster, lbName, cred)
+	if err != nil {
+		return err
+	}
 
-	poller, err := deploymentsClient.BeginCreateOrUpdate(
-		ctx,
-		cluster,
-		deploymentName,
-		armresources.Deployment{
-			Properties: &armresources.DeploymentProperties{
-				Template:   b,
-				Parameters: parameters,
-				Mode:       to.Ptr(armresources.DeploymentModeIncremental),
+	if !isControlPlane {
+		inboundNatPools = nil
+	}
+
+	storageProfile := &armcompute.VirtualMachineScaleSetStorageProfile{
+		ImageReference: &armcompute.ImageReference{
+			Publisher: to.Ptr("MicrosoftCblMariner"),
+			Offer:     to.Ptr("Cbl-Mariner"),
+			SKU:       to.Ptr("cbl-mariner-2-gen2"),
+			Version:   to.Ptr("latest"),
+		},
+		OSDisk: &armcompute.VirtualMachineScaleSetOSDisk{
+			CreateOption: to.Ptr(armcompute.DiskCreateOptionTypesFromImage),
+			ManagedDisk: &armcompute.VirtualMachineScaleSetManagedDiskParameters{
+				StorageAccountType: to.Ptr(armcompute.StorageAccountTypesStandardLRS),
 			},
 		},
-		nil,
-	)
-	if err != nil {
-		return fmt.Errorf("failed to start pool deployment: %w", err)
 	}
 
+	vmssParams := armcompute.VirtualMachineScaleSet{
+		Location: to.Ptr(location),
+		SKU: &armcompute.SKU{
+			Name:     to.Ptr("Standard_D2s_v3"),
+			Tier:     to.Ptr("Standard"),
+			Capacity: to.Ptr[int64](int64(instanceCount)),
+		},
+		Tags: map[string]*string{
+			"k3a": to.Ptr(role),
+		},
+		Identity: &armcompute.VirtualMachineScaleSetIdentity{
+			Type: to.Ptr(armcompute.ResourceIdentityTypeUserAssigned),
+			UserAssignedIdentities: map[string]*armcompute.VirtualMachineScaleSetIdentityUserAssignedIdentitiesValue{
+				*msi.ID: {},
+			},
+		},
+		Properties: &armcompute.VirtualMachineScaleSetProperties{
+			UpgradePolicy: &armcompute.UpgradePolicy{
+				Mode: to.Ptr(armcompute.UpgradeModeManual),
+			},
+			VirtualMachineProfile: &armcompute.VirtualMachineScaleSetVMProfile{
+				OSProfile: &armcompute.VirtualMachineScaleSetOSProfile{
+					ComputerNamePrefix: to.Ptr(fmt.Sprintf("%s-", args.Name)),
+					AdminUsername:      to.Ptr("azureuser"),
+					CustomData:         to.Ptr(customDataB64),
+					LinuxConfiguration: &armcompute.LinuxConfiguration{
+						DisablePasswordAuthentication: to.Ptr(true),
+						SSH: &armcompute.SSHConfiguration{
+							PublicKeys: []*armcompute.SSHPublicKey{
+								{
+									Path:    to.Ptr("/home/azureuser/.ssh/authorized_keys"),
+									KeyData: to.Ptr(sshKey),
+								},
+							},
+						},
+					},
+				},
+				StorageProfile: storageProfile,
+				NetworkProfile: &armcompute.VirtualMachineScaleSetNetworkProfile{
+					NetworkInterfaceConfigurations: []*armcompute.VirtualMachineScaleSetNetworkConfiguration{
+						{
+							Name: to.Ptr(args.Name + "-nic"),
+							Properties: &armcompute.VirtualMachineScaleSetNetworkConfigurationProperties{
+								Primary: to.Ptr(true),
+								IPConfigurations: []*armcompute.VirtualMachineScaleSetIPConfiguration{
+									{
+										Name: to.Ptr(args.Name + "-ipconfig"),
+										Properties: &armcompute.VirtualMachineScaleSetIPConfigurationProperties{
+											Subnet: &armcompute.APIEntityReference{
+												ID: subnet.ID,
+											},
+											LoadBalancerBackendAddressPools: backendPools,
+											LoadBalancerInboundNatPools:     inboundNatPools,
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	done := spinner.Spinner("Creating VMSS...")
+	poller, err := vmssClient.BeginCreateOrUpdate(ctx, cluster, vmssName, vmssParams, nil)
+	if err != nil {
+		done()
+		return fmt.Errorf("failed to start VMSS creation: %w", err)
+	}
 	resp, err := poller.PollUntilDone(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("pool deployment failed: %w", err)
+		done()
+		return fmt.Errorf("VMSS creation failed: %w", err)
 	}
+	done()
 
-	fmt.Printf("Pool deployment succeeded: %v\n", *resp.ID)
+	fmt.Printf("VMSS deployment succeeded: %v\n", *resp.ID)
 	return nil
-}
-
-func createPoolAction(c *cli.Context) error {
-	args := CreatePoolArgs{
-		SubscriptionID: c.String("subscription"),
-		Cluster:        c.String("cluster"),
-		Location:       c.String("region"),
-		Role:           c.String("role"),
-		Name:           c.String("name"),
-		SSHKeyPath:     c.String("ssh-key"),
-		InstanceCount:  c.Int("instance-count"),
-	}
-	return Create(args)
 }

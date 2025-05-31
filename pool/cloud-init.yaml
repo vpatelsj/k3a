@@ -7,8 +7,14 @@ packages:
   - azure-cli
   - python3
 
-{{- if eq .Role "control-plane" }}
 write_files:
+  - path: /etc/rancher/k3s/registries.yaml
+    permissions: '0644'
+    content: |
+      mirrors:
+        registry.internal:
+
+{{- if eq .Role "control-plane" }}
   - path: /usr/local/bin/update-peers.sh
     permissions: '0755'
     content: |
@@ -117,16 +123,20 @@ write_files:
 {{- end }}
 
 runcmd:
+  - iptables -A INPUT -p tcp --dport 6443 -j ACCEPT
   - iptables -A INPUT -p tcp --dport 443 -j ACCEPT
+  - iptables -A INPUT -p tcp --dport 10250 -j ACCEPT
+  - iptables -A INPUT -p tcp --dport 5001 -j ACCEPT
+  - iptables -A INPUT -p udp --dport 5001 -j ACCEPT
   - iptables -A INPUT -p icmp -j ACCEPT
+  - iptables -A INPUT -p udp --dport 8472 -j ACCEPT
   - az login --identity
   - export POSTGRES_PASSWORD=$(az keyvault secret show --vault-name "{{.KeyVaultName}}" --name "postgres-admin-password" --query value -o tsv)
   - export POSTGRES_PASSWORD_ESCAPED=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['POSTGRES_PASSWORD']))")
   - |
     {{- if eq .Role "control-plane" }}
-    iptables -A INPUT -p tcp --dport 6443 -j ACCEPT
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.28.5+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
-  
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
+
     systemctl daemon-reload
     systemctl enable --now k3s-node-labeler.service
     systemctl enable --now k3s-update-peer.service
@@ -146,6 +156,6 @@ runcmd:
     done
 
     {{- else }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="v1.28.5+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443
     sleep 5
     {{- end }}

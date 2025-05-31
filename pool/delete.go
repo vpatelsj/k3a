@@ -6,6 +6,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
+	"github.com/jwilder/k3a/pkg/spinner"
 )
 
 type DeletePoolArgs struct {
@@ -32,14 +33,18 @@ func Delete(args DeletePoolArgs) error {
 		return fmt.Errorf("failed to create VMSS client: %w", err)
 	}
 	vmssName := poolName + "-vmss"
+	done := spinner.Spinner("Deleting VMSS...")
 	poller, err := vmssClient.BeginDelete(ctx, cluster, vmssName, nil)
 	if err != nil {
+		done()
 		return fmt.Errorf("failed to start VMSS deletion: %w", err)
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
 	if err != nil {
+		done()
 		return fmt.Errorf("failed to delete VMSS: %w", err)
 	}
+	done()
 	fmt.Printf("Pool '%s' deleted successfully in cluster '%s'.\n", poolName, cluster)
 	return nil
 }
