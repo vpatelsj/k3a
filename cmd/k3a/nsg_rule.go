@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 
 	"github.com/jwilder/k3a/nsg/rules"
@@ -11,16 +12,6 @@ var (
 	clusterDefault string
 	nsgName        string
 	allRules       bool
-
-	addRuleName       string
-	addRulePriority   int32
-	addRuleDirection  string
-	addRuleAccess     string
-	addRuleProtocol   string
-	addRuleSource     string
-	addRuleSourcePort string
-	addRuleDest       string
-	addRuleDestPort   string
 )
 
 var nsgRuleCmd = &cobra.Command{
@@ -34,7 +25,7 @@ var nsgRuleCmd = &cobra.Command{
 var nsgRuleAddCmd = &cobra.Command{
 	Use:   "add",
 	Short: "Add a rule to an NSG",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		nsgName, _ := cmd.Flags().GetString("nsg-name")
 		ruleName, _ := cmd.Flags().GetString("name")
 		priority, _ := cmd.Flags().GetInt32("priority")
@@ -46,53 +37,43 @@ var nsgRuleAddCmd = &cobra.Command{
 		dest, _ := cmd.Flags().GetString("dest")
 		destPort, _ := cmd.Flags().GetString("dest-port")
 
+		subscriptionID, _ := cmd.Root().Flags().GetString("subscription")
+
 		if subscriptionID == "" {
-			cmd.Println("Flag --subscription-id is required (or set K3A_SUBSCRIPTION)")
-			return
+			return errors.New("Flag --subscription-id is required (or set K3A_SUBSCRIPTION)")
 		}
 		if clusterDefault == "" {
-			cmd.Println("Flag --cluster is required (or set K3A_CLUSTER)")
-			return
+			return errors.New("Flag --cluster is required (or set K3A_CLUSTER)")
 		}
 		if nsgName == "" {
-			cmd.Println("Flag --nsg-name is required")
-			return
+			return errors.New("Flag --nsg-name is required")
 		}
 		if ruleName == "" {
-			cmd.Println("Flag --name is required")
-			return
+			return errors.New("Flag --name is required")
 		}
 		if priority == 0 {
-			cmd.Println("Flag --priority is required and must be > 0")
-			return
+			return errors.New("Flag --priority is required and must be > 0")
 		}
 		if direction == "" {
-			cmd.Println("Flag --direction is required (Inbound or Outbound)")
-			return
+			return errors.New("Flag --direction is required (Inbound or Outbound)")
 		}
 		if access == "" {
-			cmd.Println("Flag --access is required (Allow or Deny)")
-			return
+			return errors.New("Flag --access is required (Allow or Deny)")
 		}
 		if protocol == "" {
-			cmd.Println("Flag --protocol is required (Tcp, Udp, or *)")
-			return
+			return errors.New("Flag --protocol is required (Tcp, Udp, or *)")
 		}
 		if source == "" {
-			cmd.Println("Flag --source is required")
-			return
+			return errors.New("Flag --source is required")
 		}
 		if sourcePort == "" {
-			cmd.Println("Flag --source-port is required")
-			return
+			return errors.New("Flag --source-port is required")
 		}
 		if dest == "" {
-			cmd.Println("Flag --dest is required")
-			return
+			return errors.New("Flag --dest is required")
 		}
 		if destPort == "" {
-			cmd.Println("Flag --dest-port is required")
-			return
+			return errors.New("Flag --dest-port is required")
 		}
 
 		addArgs := rules.AddRuleArgs{
@@ -113,9 +94,10 @@ var nsgRuleAddCmd = &cobra.Command{
 		err := rules.AddRule(addArgs)
 		if err != nil {
 			cmd.PrintErrln("Error adding NSG rule:", err)
-			return
+			return err
 		}
 		cmd.Println("NSG rule added successfully.")
+		return nil
 	},
 }
 
@@ -197,7 +179,6 @@ func init() {
 		clusterDefault = v
 	}
 
-	nsgRuleListCmd.Flags().StringVar(&subscriptionID, "subscription-id", "", "Azure subscription ID")
 	nsgRuleListCmd.Flags().StringVar(&clusterDefault, "cluster", clusterDefault, "Cluster name (resource group) (or set K3A_CLUSTER)")
 	nsgRuleListCmd.Flags().StringVar(&nsgName, "nsg-name", "", "Azure NSG name")
 	nsgRuleListCmd.Flags().BoolVar(&allRules, "all", false, "Show all rules including default rules")

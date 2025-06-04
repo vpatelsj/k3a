@@ -66,10 +66,15 @@ func Create(args CreateRuleArgs) error {
 	}
 	var backendPoolID *string
 	if props != nil && props.BackendAddressPools != nil && len(props.BackendAddressPools) > 0 {
-		backendPoolID = props.BackendAddressPools[0].ID
+		for _, pool := range props.BackendAddressPools {
+			if pool != nil && pool.Name != nil && *pool.Name != "outbound-pool" {
+				backendPoolID = pool.ID
+				break
+			}
+		}
 	}
 	if backendPoolID == nil {
-		return fmt.Errorf("No backend address pool found on load balancer '%s'", lbName)
+		return fmt.Errorf("No suitable backend address pool found on load balancer '%s' (excluding 'outbound-rule')", lbName)
 	}
 
 	// Ensure a TCP health probe exists for the backend port

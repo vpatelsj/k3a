@@ -3,11 +3,11 @@ package pool
 import (
 	"bytes"
 	"context"
+	"embed"
 	"encoding/base64"
 	"fmt"
 	"os"
 	"text/template"
-	"embed"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -77,7 +77,7 @@ func getSubnet(ctx context.Context, subscriptionID, cluster, vnetName string, cr
 }
 
 // getLoadBalancerPools fetches backend and inbound NAT pools for control plane
-func getLoadBalancerPools(ctx context.Context, subscriptionID, cluster, lbName string, cred *azidentity.DefaultAzureCredential) ([]*armcompute.SubResource, []*armcompute.SubResource, error) {
+func getLoadBalancerPools(ctx context.Context, subscriptionID, cluster, lbName, poolName string, cred *azidentity.DefaultAzureCredential) ([]*armcompute.SubResource, []*armcompute.SubResource, error) {
 	lbClient, err := armnetwork.NewLoadBalancersClient(subscriptionID, cred, nil)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to create load balancer client: %w", err)
@@ -86,11 +86,63 @@ func getLoadBalancerPools(ctx context.Context, subscriptionID, cluster, lbName s
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get load balancer: %w", err)
 	}
-	var backendPools []*armcompute.SubResource
-	var inboundNatPools []*armcompute.SubResource
-	if lb.Properties != nil && lb.Properties.BackendAddressPools != nil && len(lb.Properties.BackendAddressPools) > 0 {
-		backendPools = []*armcompute.SubResource{{ID: lb.Properties.BackendAddressPools[0].ID}}
+
+	// Use poolName in the backend pool name
+	backendPoolName := "outbound-pool"
+	// Always add the VMSS to the existing backend pool (if found)
+	var existingBackendPoolID *string
+	if lb.Properties != nil && lb.Properties.BackendAddressPools != nil {
+		for _, bp := range lb.Properties.BackendAddressPools {
+			if bp.Name != nil && *bp.Name == backendPoolName {
+				existingBackendPoolID = bp.ID
+				break
+			}
+		}
 	}
+
+	// Create a new backend pool for this VMSS
+	newBackendPoolName := fmt.Sprintf("%s-backend-pool", poolName)
+	var newBackendPoolID *string
+	if lb.Properties != nil && lb.Properties.BackendAddressPools != nil {
+		for _, bp := range lb.Properties.BackendAddressPools {
+			if bp.Name != nil && *bp.Name == newBackendPoolName {
+				newBackendPoolID = bp.ID
+				break
+			}
+		}
+	}
+	if newBackendPoolID == nil {
+		backendPoolsClient, err := armnetwork.NewLoadBalancerBackendAddressPoolsClient(subscriptionID, cred, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get load balancer: %w", err)
+		}
+		backendPoolParams := armnetwork.BackendAddressPool{
+			Name: to.Ptr(newBackendPoolName),
+		}
+		backendPoolPoller, err := backendPoolsClient.BeginCreateOrUpdate(ctx, cluster, lbName, newBackendPoolName, backendPoolParams, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to start extra backend address pool creation: %w", err)
+		}
+		backendPoolResp, err := backendPoolPoller.PollUntilDone(ctx, nil)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create extra backend address pool: %w", err)
+		}
+		newBackendPoolID = backendPoolResp.ID
+	}
+
+	// Add both backend pools to the VMSS
+	var backendPools []*armcompute.SubResource
+	if existingBackendPoolID != nil {
+		backendPools = append(backendPools, &armcompute.SubResource{ID: existingBackendPoolID})
+	}
+	if newBackendPoolID != nil {
+		backendPools = append(backendPools, &armcompute.SubResource{ID: newBackendPoolID})
+	}
+	if len(backendPools) == 0 {
+		return nil, nil, fmt.Errorf("no backend pools found or created for VMSS")
+	}
+
+	var inboundNatPools []*armcompute.SubResource
 	if lb.Properties != nil && lb.Properties.InboundNatPools != nil && len(lb.Properties.InboundNatPools) > 0 {
 		inboundNatPools = []*armcompute.SubResource{{ID: lb.Properties.InboundNatPools[0].ID}}
 	}
@@ -99,7 +151,7 @@ func getLoadBalancerPools(ctx context.Context, subscriptionID, cluster, lbName s
 
 // getSSHKey reads the SSH public key from the given path
 func getSSHKey(sshKeyPath string) (string, error) {
-	if (sshKeyPath == "") {
+	if sshKeyPath == "" {
 		sshKeyPath = os.ExpandEnv("$HOME/.ssh/id_rsa.pub")
 	}
 	sshKeyBytes, err := os.ReadFile(sshKeyPath)
@@ -230,7 +282,7 @@ func Create(args CreatePoolArgs) error {
 	var backendPools []*armcompute.SubResource
 	var inboundNatPools []*armcompute.SubResource
 	lbName := fmt.Sprintf("k3alb%s", clusterHash)
-	backendPools, inboundNatPools, err = getLoadBalancerPools(ctx, subscriptionID, cluster, lbName, cred)
+	backendPools, inboundNatPools, err = getLoadBalancerPools(ctx, subscriptionID, cluster, lbName, args.Name, cred)
 	if err != nil {
 		return err
 	}

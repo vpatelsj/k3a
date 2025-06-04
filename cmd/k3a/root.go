@@ -29,6 +29,4 @@ func init() {
 		subscriptionID = v
 	}
 	rootCmd.PersistentFlags().StringVar(&subscriptionID, "subscription", subscriptionID, "Azure subscription ID (or set K3A_SUBSCRIPTION)")
-	// Register kubeconfig command
-	// (init() in kubeconfig.go will also add it, but this ensures it's loaded)
 }

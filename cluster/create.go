@@ -9,6 +9,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/postgresql/armpostgresqlflexibleservers"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
+	"github.com/jwilder/k3a/pkg/spinner"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -180,6 +181,9 @@ func Create(args CreateArgs) error {
 	}
 	ctx := context.Background()
 
+	stopSpinner := spinner.Spinner("Creating cluster...")
+	defer stopSpinner()
+
 	if err := createResourceGroup(ctx, subscriptionID, cluster, location, cred); err != nil {
 		return err
 	}
@@ -257,20 +261,26 @@ func Create(args CreateArgs) error {
 		return fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
 
+	postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
+	if err != nil {
+		return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
+	}
+	if postgresPassword == "" {
+		// Generate a strong password for Postgres
+		postgresPassword, err = kstrings.GeneratePassword(24)
+		if err != nil {
+			return fmt.Errorf("failed to generate postgres password: %w", err)
+		}
+	}
+
 	clusterHash := kstrings.UniqueString(cluster)
 	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", "P@ssw0rd123!", clusterHash, cred); err != nil {
+	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, cred); err != nil {
 		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
 	}
 
 	if err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient); err != nil {
 		return fmt.Errorf("failed to create Load Balancer: %w", err)
-	}
-
-	// Generate a strong password for Postgres
-	postgresPassword, err := kstrings.GeneratePassword(24)
-	if err != nil {
-		return fmt.Errorf("failed to generate postgres password: %w", err)
 	}
 
 	// Reset the Postgres admin password to the generated password
@@ -336,36 +346,28 @@ func createNetworkSecurityGroup(ctx context.Context, subscriptionID, resourceGro
 	if err != nil {
 		return "", fmt.Errorf("failed to create NSG client: %w", err)
 	}
-	pollerResp, err := nsgClient.BeginCreateOrUpdate(ctx, resourceGroup, nsgName, armnetwork.SecurityGroup{
-		Location: to.Ptr(location),
-		Properties: &armnetwork.SecurityGroupPropertiesFormat{
-			SecurityRules: []*armnetwork.SecurityRule{
-				{
-					Name: to.Ptr("AllowCorpNet"),
-					Properties: &armnetwork.SecurityRulePropertiesFormat{
-						Priority:                 to.Ptr[int32](100),
-						Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
-						Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
-						Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolAsterisk),
-						SourcePortRange:          to.Ptr("*"),
-						DestinationPortRange:     to.Ptr("*"),
-						SourceAddressPrefix:      to.Ptr("CorpNetPublic"),
-						DestinationAddressPrefix: to.Ptr("*"),
-						Description:              to.Ptr("Allow all ports from CorpNetPublic service tag"),
-					},
-				},
-			},
-		},
-	}, nil)
+
+	var nsg armnetwork.SecurityGroup
+	// Check if NSG already exists
+	nsgResp, err := nsgClient.Get(ctx, resourceGroup, nsgName, nil)
+	if err == nil {
+		nsg = nsgResp.SecurityGroup
+	}
+	nsg.Location = to.Ptr(location)
+
+	// NSG does not exist, create it
+	pollerResp, err := nsgClient.BeginCreateOrUpdate(ctx, resourceGroup, nsgName, nsg, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create NSG: %w", err)
 	}
-	_, err = pollerResp.PollUntilDone(ctx, nil)
+	finalResp, err := pollerResp.PollUntilDone(ctx, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to complete NSG creation: %w", err)
 	}
-	nsgID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/networkSecurityGroups/%s", subscriptionID, resourceGroup, nsgName)
-	return nsgID, nil
+	if finalResp.SecurityGroup.ID == nil {
+		return "", fmt.Errorf("NSG creation did not return a valid ID")
+	}
+	return *finalResp.SecurityGroup.ID, nil
 }
 
 // createVirtualNetwork creates a Virtual Network with subnets and attaches the NSG
@@ -525,15 +527,36 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 	}
 	publicIPID := *publicIP.ID
 
-	// 3. Create Load Balancer
+	// 3. Create or Update Load Balancer
 	lbClient, err := armnetwork.NewLoadBalancersClient(subscriptionID, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create load balancer client: %w", err)
 	}
 	frontendIPConfigName := "LoadBalancerFrontend"
-	backendPoolName := "BackendPool"
+	backendPoolName := "outbound-pool"
 	sshNatPoolName := "ssh"
 	outboundRuleName := "OutboundRule"
+
+	// Load existing backend pools if the LB exists
+	existingBackendPools := []*armnetwork.BackendAddressPool{}
+	getLB, err := lbClient.Get(ctx, resourceGroup, lbName, nil)
+	if err == nil && getLB.LoadBalancer.Properties != nil && getLB.LoadBalancer.Properties.BackendAddressPools != nil {
+		existingBackendPools = getLB.LoadBalancer.Properties.BackendAddressPools
+	}
+	// Check if outbound-pool already exists
+	foundOutboundPool := false
+	for _, pool := range existingBackendPools {
+		if pool != nil && pool.Name != nil && *pool.Name == backendPoolName {
+			foundOutboundPool = true
+			break
+		}
+	}
+	if !foundOutboundPool {
+		existingBackendPools = append(existingBackendPools, &armnetwork.BackendAddressPool{
+			Name: to.Ptr(backendPoolName),
+		})
+	}
+
 	_, err = lbClient.BeginCreateOrUpdate(ctx, resourceGroup, lbName, armnetwork.LoadBalancer{
 		Location: to.Ptr(location),
 		SKU: &armnetwork.LoadBalancerSKU{
@@ -548,11 +571,7 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 					},
 				},
 			},
-			BackendAddressPools: []*armnetwork.BackendAddressPool{
-				{
-					Name: to.Ptr(backendPoolName),
-				},
-			},
+			BackendAddressPools: existingBackendPools,
 			InboundNatPools: []*armnetwork.InboundNatPool{
 				{
 					Name: to.Ptr(sshNatPoolName),
@@ -638,4 +657,22 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 	}
 
 	return nil
+}
+
+// getSecretFromKeyVault retrieves a secret value from Azure Key Vault
+func getSecretFromKeyVault(ctx context.Context, subscriptionID, keyVaultName, secretName string) (string, error) {
+	vaultUrl := fmt.Sprintf("https://%s.vault.azure.net/", keyVaultName)
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to get Azure credential: %w", err)
+	}
+	client, err := azsecrets.NewClient(vaultUrl, cred, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create Key Vault client: %w", err)
+	}
+	resp, err := client.GetSecret(ctx, secretName, "", nil)
+	if err != nil || resp.Value == nil {
+		return "", err
+	}
+	return *resp.Value, nil
 }
