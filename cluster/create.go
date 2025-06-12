@@ -2,10 +2,13 @@ package cluster
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/postgresql/armpostgresqlflexibleservers"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
@@ -125,13 +128,28 @@ func createManagedIdentity(ctx context.Context, subscriptionID, resourceGroup, l
 		Location: to.Ptr(location),
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create managed identity: %w", err)
+		return "", fmt.Errorf("failed to begin creating managed identity: %w", err)
 	}
 	msiPrincipalID := msiResp.Identity.Properties.PrincipalID
 	if msiPrincipalID == nil {
 		return "", fmt.Errorf("failed to get principalId from managed identity response")
 	}
-	return *msiPrincipalID, nil
+
+	// Wait for AAD propagation: try to get the MSI principal from AAD
+	const maxRetries = 10
+	const retryDelay = 3 * time.Second
+	msiObjectID := *msiPrincipalID
+	for i := 0; i < maxRetries; i++ {
+		// Try to get the MSI by objectId
+		_, err := msiClient.Get(ctx, resourceGroup, msiName, nil)
+		if err == nil {
+			return msiObjectID, nil
+		}
+		if i < maxRetries-1 {
+			time.Sleep(retryDelay)
+		}
+	}
+	return "", fmt.Errorf("managed identity created but not found in AAD after propagation wait")
 }
 
 // createStorageAccount creates a storage account
@@ -160,6 +178,27 @@ func getCurrentPrincipalID(ctx context.Context, cred *azidentity.DefaultAzureCre
 	if v := os.Getenv("AZURE_CLIENT_OBJECT_ID"); v != "" {
 		return v, nil
 	}
+
+	// Try to get objectId from Azure Instance Metadata Service (IMDS) if running as MSI
+	imdsURL := "http://169.254.169.254/metadata/identity/info?api-version=2018-02-01"
+	imdsCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	req, err := http.NewRequestWithContext(imdsCtx, "GET", imdsURL, nil)
+	if err == nil {
+		req.Header.Set("Metadata", "true")
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			var imdsResp struct {
+				ObjectID string `json:"objectId"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&imdsResp); err == nil && imdsResp.ObjectID != "" {
+				return imdsResp.ObjectID, nil
+			}
+		}
+	}
+
+	// Fallback: try to get user object id via Azure CLI (works for user accounts, not MSI)
 	out, err := exec.CommandContext(ctx, "az", "ad", "signed-in-user", "show", "--query", "id", "-o", "tsv").Output()
 	if err != nil {
 		return "", fmt.Errorf("failed to get calling principal id: %w", err)
@@ -671,8 +710,15 @@ func getSecretFromKeyVault(ctx context.Context, subscriptionID, keyVaultName, se
 		return "", fmt.Errorf("failed to create Key Vault client: %w", err)
 	}
 	resp, err := client.GetSecret(ctx, secretName, "", nil)
-	if err != nil || resp.Value == nil {
+	if err != nil {
+		// Check for SecretNotFound using the error's Error() string
+		if strings.Contains(err.Error(), "SecretNotFound") {
+			return "", nil // Secret not found, return empty string and no error
+		}
 		return "", err
+	}
+	if resp.Value == nil {
+		return "", nil
 	}
 	return *resp.Value, nil
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 
 	"github.com/jwilder/k3a/nsg"
@@ -18,22 +19,20 @@ var nsgCmd = &cobra.Command{
 var nsgListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List Network Security Groups",
-	Run: func(cmd *cobra.Command, args []string) {
+	RunE: func(cmd *cobra.Command, args []string) error {
 		subscriptionID, _ := cmd.Root().Flags().GetString("subscription")
 		cluster, _ := cmd.Flags().GetString("cluster")
 		if subscriptionID == "" {
-			cmd.PrintErrln("--subscription is required")
-			os.Exit(1)
+			return fmt.Errorf("--subscription is required")
 		}
 		if cluster == "" {
-			cmd.PrintErrln("--cluster is required")
-			os.Exit(1)
+			return fmt.Errorf("--cluster is required")
 		}
 		err := nsg.List(subscriptionID, cluster)
 		if err != nil {
-			cmd.PrintErrln("Error listing NSGs:", err)
-			os.Exit(1)
+			return fmt.Errorf("error listing NSGs: %w", err)
 		}
+		return nil
 	},
 }
 

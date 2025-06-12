@@ -69,3 +69,71 @@ func List(args ListPoolArgs) error {
 	}
 	return nil
 }
+
+// ListInstancesArgs holds arguments for listing instances in a pool
+type ListInstancesArgs struct {
+	SubscriptionID string
+	Cluster        string
+	PoolName       string
+}
+
+// ListInstances lists all VMSS instances in the specified pool
+func ListInstances(args ListInstancesArgs) error {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return fmt.Errorf("failed to get credentials: %w", err)
+	}
+	ctx := context.Background()
+	vmssVMsClient, err := armcompute.NewVirtualMachineScaleSetVMsClient(args.SubscriptionID, cred, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create VMSS VMs client: %w", err)
+	}
+	vmssName := args.PoolName + "-vmss"
+	pager := vmssVMsClient.NewListPager(args.Cluster, vmssName, nil)
+
+	tbl := table.New("ID", "NAME", "SKU", "ZONE", "STATUS", "LATEST MODEL")
+	found := false
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to get VMSS instances: %w", err)
+		}
+		for _, vm := range page.Value {
+			id := "-"
+			if vm.InstanceID != nil {
+				id = *vm.InstanceID
+			}
+			name := "-"
+			if vm.Name != nil {
+				name = *vm.Name
+			}
+			status := "-"
+			if vm.Properties != nil && vm.Properties.ProvisioningState != nil {
+				status = *vm.Properties.ProvisioningState
+			}
+			size := "-"
+			if vm.SKU != nil && vm.SKU.Name != nil {
+				size = *vm.SKU.Name
+			}
+			zone := "-"
+			if vm.Zones != nil && len(vm.Zones) > 0 {
+				zone = *vm.Zones[0]
+			}
+			latestModel := "-"
+			if vm.Properties != nil && vm.Properties.LatestModelApplied != nil {
+				if *vm.Properties.LatestModelApplied {
+					latestModel = "yes"
+				} else {
+					latestModel = "no"
+				}
+			}
+			tbl.AddRow(id, name, size, zone, status, latestModel)
+			found = true
+		}
+	}
+	tbl.Print()
+	if !found {
+		fmt.Println("No instances found in pool.")
+	}
+	return nil
+}

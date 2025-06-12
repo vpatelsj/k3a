@@ -51,6 +51,8 @@ var createPoolCmd = &cobra.Command{
 		sshKeyPath, _ := cmd.Flags().GetString("ssh-key")
 		instanceCount, _ := cmd.Flags().GetInt("instance-count")
 		k8sVersion, _ := cmd.Flags().GetString("k8s-version")
+		sku, _ := cmd.Flags().GetString("sku")
+		osDiskSize, _ := cmd.Flags().GetInt("os-disk-size")
 		// matched, err := regexp.MatchString(`^v\\d+\\.\\d+\\.\\d+`, k8sVersion)
 		// if err != nil {
 		// 	return err
@@ -68,6 +70,8 @@ var createPoolCmd = &cobra.Command{
 			SSHKeyPath:     sshKeyPath,
 			InstanceCount:  instanceCount,
 			K8sVersion:     k8sVersion,
+			SKU:            sku,
+			OSDiskSizeGB:   osDiskSize,
 		})
 	},
 }
@@ -139,6 +143,8 @@ func init() {
 	createPoolCmd.Flags().Int("instance-count", 1, "Number of VMSS instances")
 	createPoolCmd.Flags().String("ssh-key", os.ExpandEnv("$HOME/.ssh/id_rsa.pub"), "Path to the SSH public key file")
 	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes (k3s) version (e.g. v1.33.1)")
+	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Standard_D2s_v3)")
+	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
 
 	_ = createPoolCmd.MarkFlagRequired("name")
 	_ = createPoolCmd.MarkFlagRequired("role")
@@ -155,6 +161,8 @@ func init() {
 	_ = scalePoolCmd.MarkFlagRequired("name")
 	_ = scalePoolCmd.MarkFlagRequired("instance-count")
 
+	poolCmd.AddCommand(instancesPoolCmd)
 	poolCmd.AddCommand(listPoolsCmd, createPoolCmd, deletePoolCmd, scalePoolCmd)
+
 	rootCmd.AddCommand(poolCmd)
 }

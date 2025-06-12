@@ -83,3 +83,38 @@ func Delete(args DeletePoolArgs) error {
 	fmt.Printf("Pool '%s' and backend pool '%s' deleted successfully in cluster '%s'.\n", poolName, backendPoolName, cluster)
 	return nil
 }
+
+// DeleteInstanceArgs holds arguments for deleting a VMSS instance
+type DeleteInstanceArgs struct {
+	SubscriptionID string
+	Cluster        string
+	PoolName       string
+	InstanceID     string
+}
+
+// DeleteInstance deletes a single VMSS instance in the specified pool
+func DeleteInstance(args DeleteInstanceArgs) error {
+	cred, err := azidentity.NewDefaultAzureCredential(nil)
+	if err != nil {
+		return fmt.Errorf("failed to get credentials: %w", err)
+	}
+	ctx := context.Background()
+	vmssVMsClient, err := armcompute.NewVirtualMachineScaleSetVMsClient(args.SubscriptionID, cred, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create VMSS VMs client: %w", err)
+	}
+	vmssName := args.PoolName + "-vmss"
+	done := spinner.Spinner("Deleting VMSS instance...")
+	poller, err := vmssVMsClient.BeginDelete(ctx, args.Cluster, vmssName, args.InstanceID, nil)
+	if err != nil {
+		done()
+		return fmt.Errorf("failed to start VMSS instance deletion: %w", err)
+	}
+	_, err = poller.PollUntilDone(ctx, nil)
+	done()
+	if err != nil {
+		return fmt.Errorf("failed to delete VMSS instance: %w", err)
+	}
+	fmt.Printf("Instance '%s' deleted successfully from pool '%s' in cluster '%s'.\n", args.InstanceID, args.PoolName, args.Cluster)
+	return nil
+}

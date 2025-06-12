@@ -6,6 +6,7 @@ import (
 
 	"github.com/jwilder/k3a/loadbalancer"
 	"github.com/jwilder/k3a/loadbalancer/rule"
+	kstrings "github.com/jwilder/k3a/pkg/strings"
 	"github.com/spf13/cobra"
 )
 
@@ -49,7 +50,10 @@ var ruleCreateCmd = &cobra.Command{
 			return fmt.Errorf("--cluster flag is required (or set K3A_CLUSTER)")
 		}
 
-		lbName, _ := cmd.Flags().GetString("name")
+		lbName, _ := cmd.Flags().GetString("lb-name")
+		if lbName == "" {
+			lbName = fmt.Sprintf("k3alb%s", kstrings.UniqueString(cluster)) // Default LB name based on cluster
+		}
 		lbRuleName, _ := cmd.Flags().GetString("rule-name")
 		lbFrontendPort, _ := cmd.Flags().GetInt("frontend-port")
 		lbBackendPort, _ := cmd.Flags().GetInt("backend-port")
@@ -77,7 +81,10 @@ var ruleListCmd = &cobra.Command{
 			return fmt.Errorf("--cluster flag is required (or set K3A_CLUSTER)")
 		}
 
-		lbName, _ := cmd.Flags().GetString("name")
+		lbName, _ := cmd.Flags().GetString("lb-name")
+		if lbName == "" {
+			lbName = fmt.Sprintf("k3alb%s", kstrings.UniqueString(cluster)) // Default LB name based on cluster
+		}
 		return rule.List(rule.ListRuleArgs{
 			SubscriptionID: subscriptionID,
 			ResourceGroup:  cluster,
@@ -99,7 +106,10 @@ var ruleDeleteCmd = &cobra.Command{
 			return fmt.Errorf("--cluster flag is required (or set K3A_CLUSTER)")
 		}
 
-		lbName, _ := cmd.Flags().GetString("name")
+		lbName, _ := cmd.Flags().GetString("lb-name")
+		if lbName == "" {
+			lbName = fmt.Sprintf("k3alb%s", kstrings.UniqueString(cluster)) // Default LB name based on cluster
+		}
 		lbRuleName, _ := cmd.Flags().GetString("rule-name")
 		return rule.Delete(rule.DeleteRuleArgs{
 			SubscriptionID: subscriptionID,
@@ -121,25 +131,22 @@ func init() {
 
 	// Rule create flags
 	ruleCreateCmd.Flags().String("cluster", clusterDefault, "Azure resource group name (or set K3A_CLUSTER) (required)")
-	ruleCreateCmd.Flags().String("name", "", "Load balancer name (required)")
+	ruleCreateCmd.Flags().String("lb-name", "", "Load balancer name (required)")
 	ruleCreateCmd.Flags().String("rule-name", "", "Load balancer rule name (required)")
 	ruleCreateCmd.Flags().Int("frontend-port", 0, "Frontend port (required)")
 	ruleCreateCmd.Flags().Int("backend-port", 0, "Backend port (required)")
-	_ = ruleCreateCmd.MarkFlagRequired("name")
 	_ = ruleCreateCmd.MarkFlagRequired("rule-name")
 	_ = ruleCreateCmd.MarkFlagRequired("frontend-port")
 	_ = ruleCreateCmd.MarkFlagRequired("backend-port")
 
 	// Rule list flags
 	ruleListCmd.Flags().String("cluster", clusterDefault, "Azure resource group name (or set K3A_CLUSTER) (required)")
-	ruleListCmd.Flags().String("name", "", "Load balancer name (required)")
-	_ = ruleListCmd.MarkFlagRequired("name")
+	ruleListCmd.Flags().String("lb-name", "", "Load balancer name (required)")
 
 	// Rule delete flags
 	ruleDeleteCmd.Flags().String("cluster", clusterDefault, "Azure resource group name (or set K3A_CLUSTER) (required)")
-	ruleDeleteCmd.Flags().String("name", "", "Load balancer name (required)")
+	ruleDeleteCmd.Flags().String("lb-name", "", "Load balancer name (required)")
 	ruleDeleteCmd.Flags().String("rule-name", "", "Load balancer rule name (required)")
-	_ = ruleDeleteCmd.MarkFlagRequired("name")
 	_ = ruleDeleteCmd.MarkFlagRequired("rule-name")
 
 	// Add subcommands

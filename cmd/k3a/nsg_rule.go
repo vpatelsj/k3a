@@ -22,9 +22,9 @@ var nsgRuleCmd = &cobra.Command{
 	},
 }
 
-var nsgRuleAddCmd = &cobra.Command{
-	Use:   "add",
-	Short: "Add a rule to an NSG",
+var nsgRuleCreateCmd = &cobra.Command{
+	Use:   "create",
+	Short: "Create a rule to an NSG",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		nsgName, _ := cmd.Flags().GetString("nsg-name")
 		ruleName, _ := cmd.Flags().GetString("name")
@@ -32,10 +32,10 @@ var nsgRuleAddCmd = &cobra.Command{
 		direction, _ := cmd.Flags().GetString("direction")
 		access, _ := cmd.Flags().GetString("access")
 		protocol, _ := cmd.Flags().GetString("protocol")
-		source, _ := cmd.Flags().GetString("source")
-		sourcePort, _ := cmd.Flags().GetString("source-port")
-		dest, _ := cmd.Flags().GetString("dest")
-		destPort, _ := cmd.Flags().GetString("dest-port")
+		sources, _ := cmd.Flags().GetStringSlice("source")
+		sourcePorts, _ := cmd.Flags().GetStringSlice("source-port")
+		dests, _ := cmd.Flags().GetStringSlice("dest")
+		destPorts, _ := cmd.Flags().GetStringSlice("dest-port")
 
 		subscriptionID, _ := cmd.Root().Flags().GetString("subscription")
 
@@ -46,7 +46,7 @@ var nsgRuleAddCmd = &cobra.Command{
 			return errors.New("Flag --cluster is required (or set K3A_CLUSTER)")
 		}
 		if nsgName == "" {
-			return errors.New("Flag --nsg-name is required")
+			nsgName = "k3a-nsg"
 		}
 		if ruleName == "" {
 			return errors.New("Flag --name is required")
@@ -63,16 +63,16 @@ var nsgRuleAddCmd = &cobra.Command{
 		if protocol == "" {
 			return errors.New("Flag --protocol is required (Tcp, Udp, or *)")
 		}
-		if source == "" {
+		if len(sources) == 0 {
 			return errors.New("Flag --source is required")
 		}
-		if sourcePort == "" {
+		if len(sourcePorts) == 0 {
 			return errors.New("Flag --source-port is required")
 		}
-		if dest == "" {
+		if len(dests) == 0 {
 			return errors.New("Flag --dest is required")
 		}
-		if destPort == "" {
+		if len(destPorts) == 0 {
 			return errors.New("Flag --dest-port is required")
 		}
 
@@ -85,10 +85,10 @@ var nsgRuleAddCmd = &cobra.Command{
 			Direction:       direction,
 			Access:          access,
 			Protocol:        protocol,
-			Source:          source,
-			SourcePort:      sourcePort,
-			Destination:     dest,
-			DestinationPort: destPort,
+			Sources:         sources,
+			SourcePort:      sourcePorts,
+			Destination:     dests,
+			DestinationPort: destPorts,
 		}
 
 		err := rules.AddRule(addArgs)
@@ -114,9 +114,9 @@ var nsgRuleListCmd = &cobra.Command{
 			return
 		}
 		if nsgName == "" {
-			cmd.Println("Flag --nsg-name is required")
-			return
+			nsgName = "k3a-nsg"
 		}
+
 		listArgs := rules.ListArgs{
 			SubscriptionID: subscriptionID,
 			ResourceGroup:  clusterDefault,
@@ -146,8 +146,7 @@ var nsgRuleDeleteCmd = &cobra.Command{
 			return
 		}
 		if nsgName == "" {
-			cmd.Println("Flag --nsg-name is required")
-			return
+			nsgName = "k3a-nsg"
 		}
 		if ruleName == "" {
 			cmd.Println("Flag --name is required")
@@ -171,7 +170,7 @@ var nsgRuleDeleteCmd = &cobra.Command{
 
 func init() {
 	nsgCmd.AddCommand(nsgRuleCmd)
-	nsgRuleCmd.AddCommand(nsgRuleAddCmd)
+	nsgRuleCmd.AddCommand(nsgRuleCreateCmd)
 	nsgRuleCmd.AddCommand(nsgRuleListCmd)
 	nsgRuleCmd.AddCommand(nsgRuleDeleteCmd)
 
@@ -181,18 +180,18 @@ func init() {
 
 	nsgRuleListCmd.Flags().StringVar(&clusterDefault, "cluster", clusterDefault, "Cluster name (resource group) (or set K3A_CLUSTER)")
 	nsgRuleListCmd.Flags().StringVar(&nsgName, "nsg-name", "", "Azure NSG name")
-	nsgRuleListCmd.Flags().BoolVar(&allRules, "all", false, "Show all rules including default rules")
+	nsgRuleListCmd.Flags().BoolVarP(&allRules, "all", "A", false, "Show all rules including default rules")
 
-	nsgRuleAddCmd.Flags().String("nsg-name", "", "Azure NSG name")
-	nsgRuleAddCmd.Flags().String("name", "", "Rule name (required)")
-	nsgRuleAddCmd.Flags().Int32("priority", 0, "Rule priority (required, 100-4096)")
-	nsgRuleAddCmd.Flags().String("direction", "Inbound", "Rule direction: Inbound or Outbound (required)")
-	nsgRuleAddCmd.Flags().String("access", "Allow", "Rule access: Allow or Deny (required)")
-	nsgRuleAddCmd.Flags().String("protocol", "*", "Rule protocol: Tcp, Udp, or * (required)")
-	nsgRuleAddCmd.Flags().String("source", "*", "Source address prefix (required)")
-	nsgRuleAddCmd.Flags().String("source-port", "*", "Source port range (required)")
-	nsgRuleAddCmd.Flags().String("dest", "*", "Destination address prefix (required)")
-	nsgRuleAddCmd.Flags().String("dest-port", "*", "Destination port range (required)")
+	nsgRuleCreateCmd.Flags().String("nsg-name", "", "Azure NSG name")
+	nsgRuleCreateCmd.Flags().String("name", "", "Rule name (required)")
+	nsgRuleCreateCmd.Flags().Int32("priority", 0, "Rule priority (required, 100-4096)")
+	nsgRuleCreateCmd.Flags().String("direction", "Inbound", "Rule direction: Inbound or Outbound (required)")
+	nsgRuleCreateCmd.Flags().String("access", "Allow", "Rule access: Allow or Deny (required)")
+	nsgRuleCreateCmd.Flags().String("protocol", "*", "Rule protocol: Tcp, Udp, or * (required)")
+	nsgRuleCreateCmd.Flags().StringSlice("source", []string{"*"}, "Sources address prefix (required)")
+	nsgRuleCreateCmd.Flags().StringSlice("source-port", []string{"*"}, "Sources port range (required)")
+	nsgRuleCreateCmd.Flags().StringSlice("dest", []string{"*"}, "Destination address prefix (required)")
+	nsgRuleCreateCmd.Flags().StringSlice("dest-port", []string{"*"}, "Destination port range (required)")
 
 	nsgRuleDeleteCmd.Flags().String("nsg-name", "", "Azure NSG name")
 	nsgRuleDeleteCmd.Flags().String("name", "", "Rule name to delete (required)")

@@ -130,7 +130,7 @@ runcmd:
   - iptables -A INPUT -p udp --dport 5001 -j ACCEPT
   - iptables -A INPUT -p icmp -j ACCEPT
   - iptables -A INPUT -p udp --dport 8472 -j ACCEPT
-  - az login --identity
+  - az login --identity --client-id "{{ .MSIClientID }}"
   - export POSTGRES_PASSWORD=$(az keyvault secret show --vault-name "{{.KeyVaultName}}" --name "postgres-admin-password" --query value -o tsv)
   - export POSTGRES_PASSWORD_ESCAPED=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['POSTGRES_PASSWORD']))")
   - |

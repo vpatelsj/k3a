@@ -27,6 +27,8 @@ type CreatePoolArgs struct {
 	SSHKeyPath     string
 	InstanceCount  int
 	K8sVersion     string // New field for Kubernetes version
+	SKU            string // VM SKU type
+	OSDiskSizeGB   int    // OS disk size in GB
 }
 
 //go:embed cloud-init.yaml
@@ -238,6 +240,12 @@ func Create(args CreatePoolArgs) error {
 		return err
 	}
 
+	// Reference existing resources
+	msi, err := getManagedIdentity(ctx, subscriptionID, cluster, cred)
+	if err != nil {
+		return err
+	}
+
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
 	posgresName := fmt.Sprintf("k3apg%s", clusterHash)
 	storageAccountName := fmt.Sprintf("k3astorage%s", clusterHash)
@@ -251,6 +259,7 @@ func Create(args CreatePoolArgs) error {
 		"ResourceGroup":      cluster,
 		"ExternalIP":         externalIP,
 		"K8sVersion":         args.K8sVersion, // Pass version to template
+		"MSIClientID":        *msi.Properties.ClientID,
 	}
 
 	customDataB64, err := getCloudInitData(tmplData)
@@ -264,12 +273,6 @@ func Create(args CreatePoolArgs) error {
 	}
 
 	instanceCount := args.InstanceCount
-
-	// Reference existing resources
-	msi, err := getManagedIdentity(ctx, subscriptionID, cluster, cred)
-	if err != nil {
-		return err
-	}
 
 	vnetName := "k3a-vnet"
 
@@ -303,13 +306,14 @@ func Create(args CreatePoolArgs) error {
 			ManagedDisk: &armcompute.VirtualMachineScaleSetManagedDiskParameters{
 				StorageAccountType: to.Ptr(armcompute.StorageAccountTypesStandardLRS),
 			},
+			DiskSizeGB: to.Ptr(int32(args.OSDiskSizeGB)),
 		},
 	}
 
 	vmssParams := armcompute.VirtualMachineScaleSet{
 		Location: to.Ptr(location),
 		SKU: &armcompute.SKU{
-			Name:     to.Ptr("Standard_D2s_v3"),
+			Name:     to.Ptr(args.SKU),
 			Tier:     to.Ptr("Standard"),
 			Capacity: to.Ptr[int64](int64(instanceCount)),
 		},
