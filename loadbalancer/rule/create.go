@@ -7,7 +7,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/jwilder/k3a/pkg/spinner"
 )
 
 type CreateRuleArgs struct {
@@ -133,9 +132,6 @@ func Create(args CreateRuleArgs) error {
 		existingRules = append(existingRules, newRule)
 	}
 
-	// Start spinner while waiting for the operation
-	stopSpinner := spinner.Spinner("Deploying...")
-
 	// Wait for the rule creation to complete
 	pollerResp, err := client.BeginCreateOrUpdate(ctx, resourceGroup, lbName, armnetwork.LoadBalancer{
 		Location: location,
@@ -151,10 +147,7 @@ func Create(args CreateRuleArgs) error {
 	// Wait for the operation to complete
 	_, err = pollerResp.PollUntilDone(ctx, nil)
 	if err != nil {
-		stopSpinner()
 		return err
 	}
-	stopSpinner()
-	fmt.Printf("Load balancer rule '%s' creation completed in load balancer '%s'.\n", ruleName, lbName)
 	return nil
 }

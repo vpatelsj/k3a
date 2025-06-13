@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/jwilder/k3a/pool"
+	"github.com/jwilder/k3a/pkg/spinner"
 	"github.com/spf13/cobra"
 )
 
@@ -56,12 +57,15 @@ var deleteInstancePoolCmd = &cobra.Command{
 		if instanceID == "" {
 			return fmt.Errorf("--instance-id flag is required")
 		}
-		return pool.DeleteInstance(pool.DeleteInstanceArgs{
+		done := spinner.Spinner("Deleting VMSS instance...")
+		err := pool.DeleteInstance(pool.DeleteInstanceArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,
 			PoolName:       poolName,
 			InstanceID:     instanceID,
 		})
+		done()
+		return err
 	},
 }
 
@@ -85,12 +89,15 @@ var updateInstancePoolCmd = &cobra.Command{
 		if instanceID == "" {
 			return fmt.Errorf("--instance-id flag is required")
 		}
-		return pool.UpdateInstance(pool.UpdateInstanceArgs{
+		done := spinner.Spinner("Updating VMSS instance to latest model...")
+		err := pool.UpdateInstance(pool.UpdateInstanceArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,
 			PoolName:       poolName,
 			InstanceID:     instanceID,
 		})
+		done()
+		return err
 	},
 }
 
@@ -114,12 +121,15 @@ var reimageInstancePoolCmd = &cobra.Command{
 		if instanceID == "" {
 			return fmt.Errorf("--instance-id flag is required")
 		}
-		return pool.ReimageInstance(pool.UpdateInstanceArgs{
+		done := spinner.Spinner("Reimaging VMSS instance...")
+		err := pool.ReimageInstance(pool.UpdateInstanceArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,
 			PoolName:       poolName,
 			InstanceID:     instanceID,
 		})
+		done()
+		return err
 	},
 }
 

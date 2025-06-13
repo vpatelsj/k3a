@@ -71,7 +71,3 @@ func AddRule(args AddRuleArgs) error {
 	}
 	return nil
 }
-
-func toPtr[T any](v T) *T {
-	return &v
-}

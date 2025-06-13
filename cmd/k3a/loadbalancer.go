@@ -6,14 +6,14 @@ import (
 
 	"github.com/jwilder/k3a/loadbalancer"
 	"github.com/jwilder/k3a/loadbalancer/rule"
+	"github.com/jwilder/k3a/pkg/spinner"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 	"github.com/spf13/cobra"
 )
 
 var loadBalancerCmd = &cobra.Command{
-	Use:     "loadbalancer",
-	Aliases: []string{"lb"},
-	Short:   "Manage Azure Load Balancers",
+	Use:   "lb",
+	Short: "Manage Azure Load Balancers",
 }
 
 var listLoadBalancersCmd = &cobra.Command{
@@ -57,14 +57,22 @@ var ruleCreateCmd = &cobra.Command{
 		lbRuleName, _ := cmd.Flags().GetString("rule-name")
 		lbFrontendPort, _ := cmd.Flags().GetInt("frontend-port")
 		lbBackendPort, _ := cmd.Flags().GetInt("backend-port")
-		return rule.Create(rule.CreateRuleArgs{
+
+		done := spinner.Spinner(fmt.Sprintf("Deploying rule '%s' to load balancer '%s'...", lbRuleName, lbName))
+		defer done()
+
+		if err := rule.Create(rule.CreateRuleArgs{
 			SubscriptionID: subscriptionID,
 			ResourceGroup:  cluster,
 			LBName:         lbName,
 			RuleName:       lbRuleName,
 			FrontendPort:   lbFrontendPort,
 			BackendPort:    lbBackendPort,
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to create load balancer rule '%s' in load balancer '%s': %w", lbRuleName, lbName, err)
+		}
+		fmt.Printf("Load balancer rule '%s' creation completed in load balancer '%s'.\n", lbRuleName, lbName)
+		return nil
 	},
 }
 
@@ -111,12 +119,20 @@ var ruleDeleteCmd = &cobra.Command{
 			lbName = fmt.Sprintf("k3alb%s", kstrings.UniqueString(cluster)) // Default LB name based on cluster
 		}
 		lbRuleName, _ := cmd.Flags().GetString("rule-name")
-		return rule.Delete(rule.DeleteRuleArgs{
+
+		done := spinner.Spinner(fmt.Sprintf("Deleting rule '%s' from load balancer '%s'...", lbRuleName, lbName))
+		defer done()
+
+		if err := rule.Delete(rule.DeleteRuleArgs{
 			SubscriptionID: subscriptionID,
 			ResourceGroup:  cluster,
 			LBName:         lbName,
 			RuleName:       lbRuleName,
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to delete load balancer rule '%s' in load balancer '%s': %w", lbRuleName, lbName, err)
+		}
+		fmt.Printf("Load balancer rule '%s' deletion completed in load balancer '%s'.\n", lbRuleName, lbName)
+		return nil
 	},
 }
 

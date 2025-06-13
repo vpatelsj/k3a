@@ -6,7 +6,6 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
-	"github.com/jwilder/k3a/pkg/spinner"
 )
 
 type DeleteArgs struct {
@@ -49,12 +48,10 @@ func Delete(args DeleteArgs) error {
 		return fmt.Errorf("failed to start resource group deletion: %w", err)
 	}
 
-	stopSpinner := spinner.Spinner("Deleting...")
 	_, err = poller.PollUntilDone(ctx, nil)
-	stopSpinner()
 	if err != nil {
 		return fmt.Errorf("failed to delete resource group: %w", err)
 	}
-	fmt.Printf("Cluster (resource group) '%s' deleted successfully.\n", cluster)
+
 	return nil
 }

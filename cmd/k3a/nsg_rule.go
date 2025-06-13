@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/jwilder/k3a/nsg/rules"
+	"github.com/jwilder/k3a/pkg/spinner"
 	"github.com/spf13/cobra"
 )
 
@@ -91,7 +92,10 @@ var nsgRuleCreateCmd = &cobra.Command{
 			DestinationPort: destPorts,
 		}
 
+		stopSpinner := spinner.Spinner("Adding NSG rule...")
+		defer stopSpinner()
 		err := rules.AddRule(addArgs)
+
 		if err != nil {
 			cmd.PrintErrln("Error adding NSG rule:", err)
 			return err
@@ -123,6 +127,7 @@ var nsgRuleListCmd = &cobra.Command{
 			NSGName:        nsgName,
 			All:            allRules,
 		}
+
 		err := rules.List(listArgs)
 		if err != nil {
 			cmd.PrintErrln("Error listing NSG rules:", err)
@@ -159,6 +164,8 @@ var nsgRuleDeleteCmd = &cobra.Command{
 			NSGName:        nsgName,
 			RuleName:       ruleName,
 		}
+		stopSpinner := spinner.Spinner("Deleting NSG rule...")
+		defer stopSpinner()
 		err := rules.DeleteRule(deleteArgs)
 		if err != nil {
 			cmd.PrintErrln("Error deleting NSG rule:", err)
@@ -182,6 +189,7 @@ func init() {
 	nsgRuleListCmd.Flags().StringVar(&nsgName, "nsg-name", "", "Azure NSG name")
 	nsgRuleListCmd.Flags().BoolVarP(&allRules, "all", "A", false, "Show all rules including default rules")
 
+	nsgRuleCreateCmd.Flags().StringVar(&clusterDefault, "cluster", clusterDefault, "Cluster name (resource group) (or set K3A_CLUSTER)")
 	nsgRuleCreateCmd.Flags().String("nsg-name", "", "Azure NSG name")
 	nsgRuleCreateCmd.Flags().String("name", "", "Rule name (required)")
 	nsgRuleCreateCmd.Flags().Int32("priority", 0, "Rule priority (required, 100-4096)")

@@ -7,7 +7,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
-	"github.com/jwilder/k3a/pkg/spinner"
 )
 
 type ScalePoolArgs struct {
@@ -39,12 +38,6 @@ func Scale(args ScalePoolArgs) error {
 		return fmt.Errorf("failed to create VMSS client: %w", err)
 	}
 	vmssName := poolName + "-vmss"
-	done := spinner.Spinner(fmt.Sprintf("Scaling VMSS '%s' to %d instances...", vmssName, instanceCount))
-	defer func() {
-		done()
-		fmt.Printf("Pool '%s' scaled to %d instances successfully in cluster '%s'.\n", poolName, instanceCount, cluster)
-	}()
-
 	// Get the current VMSS
 	vmss, err := vmssClient.Get(ctx, cluster, vmssName, nil)
 	if err != nil {

@@ -32,7 +32,6 @@ func List(args ListArgs) error {
 	pager := resourceGroupsClient.NewListPager(nil)
 
 	tbl := table.New("NAME", "LOCATION", "PUBLIC_IP")
-	found := false
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -63,14 +62,11 @@ func List(args ListArgs) error {
 						}
 					}
 					tbl.AddRow(*rg.Name, *rg.Location, publicIP)
-					found = true
 				}
 			}
 		}
 	}
 	tbl.Print()
-	if !found {
-		fmt.Println("No cluster resource groups found.")
-	}
+
 	return nil
 }

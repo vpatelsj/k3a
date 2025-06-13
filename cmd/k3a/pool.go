@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jwilder/k3a/pkg/spinner"
 	"github.com/jwilder/k3a/pool"
 	"github.com/spf13/cobra"
 )
@@ -53,13 +54,10 @@ var createPoolCmd = &cobra.Command{
 		k8sVersion, _ := cmd.Flags().GetString("k8s-version")
 		sku, _ := cmd.Flags().GetString("sku")
 		osDiskSize, _ := cmd.Flags().GetInt("os-disk-size")
-		// matched, err := regexp.MatchString(`^v\\d+\\.\\d+\\.\\d+`, k8sVersion)
-		// if err != nil {
-		// 	return err
-		// }
-		// if !matched {
-		// 	return fmt.Errorf("invalid k3s version format: must match v<major>.<minor>.<patch> (e.g. v1.28.5)")
-		// }
+
+		// Add spinner for pool creation
+		stopSpinner := spinner.Spinner("Creating VMSS pool...")
+		defer stopSpinner()
 
 		return pool.Create(pool.CreatePoolArgs{
 			SubscriptionID: subscriptionID,
@@ -90,6 +88,11 @@ var deletePoolCmd = &cobra.Command{
 		}
 
 		name, _ := cmd.Flags().GetString("name")
+
+		// Add spinner for pool deletion
+		stopSpinner := spinner.Spinner("Deleting VMSS pool...")
+		defer stopSpinner()
+
 		return pool.Delete(pool.DeletePoolArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,
@@ -118,6 +121,11 @@ var scalePoolCmd = &cobra.Command{
 		if instanceCount < 1 {
 			return fmt.Errorf("--instance-count must be greater than 0")
 		}
+
+		// Add spinner for pool scaling
+		stopSpinner := spinner.Spinner("Scaling VMSS pool...")
+		defer stopSpinner()
+
 		return pool.Scale(pool.ScalePoolArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,

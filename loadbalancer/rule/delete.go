@@ -2,12 +2,10 @@ package rule
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/jwilder/k3a/pkg/spinner"
 )
 
 type DeleteRuleArgs struct {
@@ -57,8 +55,6 @@ func Delete(args DeleteRuleArgs) error {
 			}
 		}
 	}
-	// Start spinner while waiting for the operation
-	stopSpinner := spinner.Spinner("Deleting rule...")
 	// Convert the response to the correct type for update
 	lbForUpdate := armnetwork.LoadBalancer{
 		Location:   lb.Location,
@@ -68,14 +64,11 @@ func Delete(args DeleteRuleArgs) error {
 	}
 	pollerResp, err := client.BeginCreateOrUpdate(ctx, resourceGroup, lbName, lbForUpdate, nil)
 	if err != nil {
-		stopSpinner()
 		return err
 	}
 	_, err = pollerResp.PollUntilDone(ctx, nil)
-	stopSpinner()
 	if err != nil {
 		return err
 	}
-	fmt.Printf("Load balancer rule '%s' deletion completed in load balancer '%s'.\n", ruleName, lbName)
 	return nil
 }

@@ -14,7 +14,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/jwilder/k3a/pkg/spinner"
+	"github.com/jwilder/k3a/loadbalancer/rule"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 )
 
@@ -374,18 +374,27 @@ func Create(args CreatePoolArgs) error {
 		},
 	}
 
-	done := spinner.Spinner("Creating VMSS...")
 	poller, err := vmssClient.BeginCreateOrUpdate(ctx, cluster, vmssName, vmssParams, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("failed to start VMSS creation: %w", err)
 	}
 	resp, err := poller.PollUntilDone(ctx, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("VMSS creation failed: %w", err)
 	}
-	done()
+
+	if args.Role == "control-plane" {
+		if err := rule.Create(rule.CreateRuleArgs{
+			SubscriptionID: subscriptionID,
+			ResourceGroup:  cluster,
+			LBName:         lbName,
+			RuleName:       "k3s",
+			FrontendPort:   6443,
+			BackendPort:    6443,
+		}); err != nil {
+			return fmt.Errorf("failed to create k3s load balancing rule: %w", err)
+		}
+	}
 
 	fmt.Printf("VMSS deployment succeeded: %v\n", *resp.ID)
 	return nil

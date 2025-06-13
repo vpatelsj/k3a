@@ -12,7 +12,6 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/postgresql/armpostgresqlflexibleservers"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
-	"github.com/jwilder/k3a/pkg/spinner"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -220,9 +219,6 @@ func Create(args CreateArgs) error {
 	}
 	ctx := context.Background()
 
-	stopSpinner := spinner.Spinner("Creating cluster...")
-	defer stopSpinner()
-
 	if err := createResourceGroup(ctx, subscriptionID, cluster, location, cred); err != nil {
 		return err
 	}
@@ -333,7 +329,6 @@ func Create(args CreateArgs) error {
 		return fmt.Errorf("failed to store secret in Key Vault: %w", err)
 	}
 
-	fmt.Printf("Postgres password stored in Key Vault '%s' as secret '%s'.\n", keyVaultName, secretName)
 	return nil
 }
 

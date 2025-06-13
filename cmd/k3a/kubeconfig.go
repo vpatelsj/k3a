@@ -15,8 +15,9 @@ var kubeconfigSecretName = "kubeconfig-admin"
 var kubeconfigCluster string
 
 var kubeconfigCmd = &cobra.Command{
-	Use:   "kubeconfig",
-	Short: "Download kubeconfig-admin secret from Azure Key Vault",
+	Use:     "kubeconfig",
+	Short:   "Download kubeconfig-admin secret from Azure Key Vault",
+	Aliases: []string{"k"},
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if kubeconfigCluster == "" {
 			return fmt.Errorf("--cluster flag is required")

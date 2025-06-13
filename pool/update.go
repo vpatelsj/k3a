@@ -6,7 +6,6 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
-	"github.com/jwilder/k3a/pkg/spinner"
 )
 
 type UpdateInstanceArgs struct {
@@ -27,14 +26,11 @@ func UpdateInstance(args UpdateInstanceArgs) error {
 		return fmt.Errorf("failed to create VMSS VMs client: %w", err)
 	}
 	vmssName := args.PoolName + "-vmss"
-	done := spinner.Spinner(fmt.Sprintf("Updating VMSS instance '%s' to latest model...", args.InstanceID))
 	poller, err := vmssVMsClient.BeginUpdate(ctx, args.Cluster, vmssName, args.InstanceID, armcompute.VirtualMachineScaleSetVM{}, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("failed to start update for VMSS instance: %w", err)
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
-	done()
 	if err != nil {
 		return fmt.Errorf("failed to update VMSS instance: %w", err)
 	}
@@ -53,14 +49,11 @@ func ReimageInstance(args UpdateInstanceArgs) error {
 		return fmt.Errorf("failed to create VMSS VMs client: %w", err)
 	}
 	vmssName := args.PoolName + "-vmss"
-	done := spinner.Spinner(fmt.Sprintf("Reimaging VMSS instance '%s'...", args.InstanceID))
 	poller, err := vmssVMsClient.BeginReimage(ctx, args.Cluster, vmssName, args.InstanceID, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("failed to start reimage for VMSS instance: %w", err)
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
-	done()
 	if err != nil {
 		return fmt.Errorf("failed to reimage VMSS instance: %w", err)
 	}

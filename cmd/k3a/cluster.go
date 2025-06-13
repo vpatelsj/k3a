@@ -4,6 +4,7 @@ import (
 	"fmt"
 
 	"github.com/jwilder/k3a/cluster"
+	"github.com/jwilder/k3a/pkg/spinner"
 	"github.com/spf13/cobra"
 )
 
@@ -26,12 +27,20 @@ var createClusterCmd = &cobra.Command{
 		}
 		region, _ := cmd.Flags().GetString("region")
 		vnetAddressSpace, _ := cmd.Flags().GetString("vnet-address-space")
-		return cluster.Create(cluster.CreateArgs{
+
+		done := spinner.Spinner(fmt.Sprintf("Creating cluster '%s' in region '%s'...", clusterName, region))
+		defer done()
+
+		if err := cluster.Create(cluster.CreateArgs{
 			SubscriptionID:   subscriptionID,
 			Cluster:          clusterName,
 			Location:         region,
 			VnetAddressSpace: vnetAddressSpace,
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to create cluster: %w", err)
+		}
+		fmt.Printf("Cluster '%s' created successfully in region '%s'\n", clusterName, region)
+		return nil
 	},
 }
 
@@ -61,10 +70,16 @@ var deleteClusterCmd = &cobra.Command{
 		if subscriptionID == "" {
 			return fmt.Errorf("--subscription flag is required (or set K3A_SUBSCRIPTION)")
 		}
-		return cluster.Delete(cluster.DeleteArgs{
+		done := spinner.Spinner(fmt.Sprintf("Deleting cluster '%s'...", clusterName))
+		defer done()
+		if err := cluster.Delete(cluster.DeleteArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        clusterName,
-		})
+		}); err != nil {
+			return fmt.Errorf("failed to delete cluster: %w", err)
+		}
+		fmt.Printf("Cluster '%s' deleted successfully\n", clusterName)
+		return nil
 	},
 }
 

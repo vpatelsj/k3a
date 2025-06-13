@@ -31,7 +31,6 @@ func List(args ListPoolArgs) error {
 	pager := vmssClient.NewListPager(cluster, nil)
 
 	tbl := table.New("CLUSTER", "NAME", "ROLE", "LOCATION", "SKU", "SIZE")
-	found := false
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -59,14 +58,11 @@ func List(args ListPoolArgs) error {
 					}
 				}
 				tbl.AddRow(cluster, poolName, role, location, vmType, size)
-				found = true
 			}
 		}
 	}
 	tbl.Print()
-	if !found {
-		fmt.Println("No pools (VMSS) found in resource group.")
-	}
+
 	return nil
 }
 
@@ -92,7 +88,6 @@ func ListInstances(args ListInstancesArgs) error {
 	pager := vmssVMsClient.NewListPager(args.Cluster, vmssName, nil)
 
 	tbl := table.New("ID", "NAME", "SKU", "ZONE", "STATUS", "LATEST MODEL")
-	found := false
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -128,12 +123,9 @@ func ListInstances(args ListInstancesArgs) error {
 				}
 			}
 			tbl.AddRow(id, name, size, zone, status, latestModel)
-			found = true
 		}
 	}
 	tbl.Print()
-	if !found {
-		fmt.Println("No instances found in pool.")
-	}
+
 	return nil
 }

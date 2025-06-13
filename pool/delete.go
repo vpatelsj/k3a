@@ -10,7 +10,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/jwilder/k3a/pkg/spinner"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 )
 
@@ -38,18 +37,15 @@ func Delete(args DeletePoolArgs) error {
 		return fmt.Errorf("failed to create VMSS client: %w", err)
 	}
 	vmssName := poolName + "-vmss"
-	done := spinner.Spinner("Deleting VMSS...")
+	// Spinner removed from here
 	poller, err := vmssClient.BeginDelete(ctx, cluster, vmssName, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("failed to start VMSS deletion: %w", err)
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("failed to delete VMSS: %w", err)
 	}
-	done()
 
 	// Compute clusterHash for consistent LB naming
 	clusterHash := kstrings.UniqueString(cluster)
@@ -104,14 +100,11 @@ func DeleteInstance(args DeleteInstanceArgs) error {
 		return fmt.Errorf("failed to create VMSS VMs client: %w", err)
 	}
 	vmssName := args.PoolName + "-vmss"
-	done := spinner.Spinner("Deleting VMSS instance...")
 	poller, err := vmssVMsClient.BeginDelete(ctx, args.Cluster, vmssName, args.InstanceID, nil)
 	if err != nil {
-		done()
 		return fmt.Errorf("failed to start VMSS instance deletion: %w", err)
 	}
 	_, err = poller.PollUntilDone(ctx, nil)
-	done()
 	if err != nil {
 		return fmt.Errorf("failed to delete VMSS instance: %w", err)
 	}
