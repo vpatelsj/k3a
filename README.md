@@ -67,7 +67,7 @@ Or specify the cluster and subscription with the `--cluster` and `--subscription
 ### Create a New Cluster
 
 ```sh
-k3a cluster create --name my-cluster --location eastus
+k3a cluster create --cluster my-cluster --region eastus
 ```
 
 ### List Clusters
@@ -76,33 +76,61 @@ k3a cluster create --name my-cluster --location eastus
 k3a cluster list
 ```
 
-### Add an NSG Rule
+### Create an NSG Rule
 
 ```sh
-k3a nsg rule add --nsg-name my-nsg --name allow-ssh --priority 100 --direction Inbound --access Allow --protocol Tcp --source * --source-port * --dest * --dest-port 22
+k3a nsg rule create --cluster my-cluster --name allow-ssh --priority 100 --direction Inbound --access Allow --protocol Tcp --source "*" --source-port "*" --dest "*" --dest-port "22"
 ```
 
 ### List NSG Rules
 
 ```sh
-k3a nsg rule list --nsg-name my-nsg
+k3a nsg rule list --cluster my-cluster
+```
+
+### List All NSG Rules (including defaults)
+
+```sh
+k3a nsg rule list --cluster my-cluster --all
 ```
 
 ### Delete an NSG Rule
 
 ```sh
-k3a nsg rule delete --nsg-name my-nsg --name allow-ssh
+k3a nsg rule delete --cluster my-cluster --name allow-ssh
+```
+
+### Create a Node Pool
+
+```sh
+k3a pool create --cluster my-cluster --name worker-pool --role worker --instance-count 3
+```
+
+### List Node Pools
+
+```sh
+k3a pool list --cluster my-cluster
 ```
 
 ### Scale a Node Pool
 
 ```sh
-k3a pool scale --name my-pool --count 5
+k3a pool scale --cluster my-cluster --name worker-pool --instance-count 5
+```
+
+### Delete a Node Pool
+
+```sh
+k3a pool delete --cluster my-cluster --name worker-pool
 ```
 
 ## Contributing
 
 Contributions are welcome! Please open issues or pull requests for bug fixes, features, or documentation improvements.
+
+## AI-Generated Code Notice
+
+A significant portion of this codebase was generated with the assistance of artificial intelligence (AI) tools.
 
 ## License
 
