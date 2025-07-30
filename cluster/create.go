@@ -105,6 +105,16 @@ func createKeyVault(ctx context.Context, subscriptionID, cluster, location, vnet
 	}, nil); err != nil {
 		return "", fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
+	certOfficerRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/14b46e9e-c2b7-41b4-b07b-48a6ebf60603", subscriptionID)
+	certOfficerRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "14b46e9e-c2b7-41b4-b07b-48a6ebf60603")
+	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, certOfficerRoleName, armauthorization.RoleAssignmentCreateParameters{
+		Properties: &armauthorization.RoleAssignmentProperties{
+			PrincipalID:      to.Ptr(msiPrincipalID),
+			RoleDefinitionID: to.Ptr(certOfficerRoleDefID),
+		},
+	}, nil); err != nil {
+		return "", fmt.Errorf("failed to assign Key Vault Certificate Officer role to MSI: %w", err)
+	}
 	callingPrincipalRoleName := kstrings.DeterministicGUID(keyVaultID + callingPrincipalID + "b86a8fe4-44ce-4948-aee5-eccb2c155cd7")
 	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, callingPrincipalRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
@@ -294,6 +304,19 @@ func Create(args CreateArgs) error {
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to assign role to MSI: %w", err)
+	}
+
+	// Assign 'Storage Table Data Contributor' role to the MSI
+	tableRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3", subscriptionID)
+	tableRoleAssignmentName := kstrings.DeterministicGUID(storageAccountID + msiID + "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3")
+	_, err = roleAssignmentsClient.Create(ctx, storageAccountID, tableRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+		Properties: &armauthorization.RoleAssignmentProperties{
+			PrincipalID:      to.Ptr(msiPrincipalID),
+			RoleDefinitionID: to.Ptr(tableRoleDefID),
+		},
+	}, nil)
+	if err != nil {
+		return fmt.Errorf("failed to assign Table Data Contributor role to MSI: %w", err)
 	}
 
 	postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")

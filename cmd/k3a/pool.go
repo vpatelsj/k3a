@@ -55,6 +55,9 @@ var createPoolCmd = &cobra.Command{
 		sku, _ := cmd.Flags().GetString("sku")
 		osDiskSize, _ := cmd.Flags().GetInt("os-disk-size")
 
+		// Accept one or more MSI resource IDs
+		msiIDs, _ := cmd.Flags().GetStringArray("msi")
+
 		// Add spinner for pool creation
 		stopSpinner := spinner.Spinner("Creating VMSS pool...")
 		defer stopSpinner()
@@ -70,6 +73,7 @@ var createPoolCmd = &cobra.Command{
 			K8sVersion:     k8sVersion,
 			SKU:            sku,
 			OSDiskSizeGB:   osDiskSize,
+			MSIIDs:         msiIDs,
 		})
 	},
 }
@@ -153,6 +157,7 @@ func init() {
 	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes (k3s) version (e.g. v1.33.1)")
 	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Standard_D2s_v3)")
 	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
+	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
 
 	_ = createPoolCmd.MarkFlagRequired("name")
 	_ = createPoolCmd.MarkFlagRequired("role")

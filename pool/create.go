@@ -26,9 +26,10 @@ type CreatePoolArgs struct {
 	Name           string
 	SSHKeyPath     string
 	InstanceCount  int
-	K8sVersion     string // New field for Kubernetes version
-	SKU            string // VM SKU type
-	OSDiskSizeGB   int    // OS disk size in GB
+	K8sVersion     string   // New field for Kubernetes version
+	SKU            string   // VM SKU type
+	OSDiskSizeGB   int      // OS disk size in GB
+	MSIIDs         []string // Additional user-assigned MSI resource IDs
 }
 
 //go:embed cloud-init.yaml
@@ -246,6 +247,14 @@ func Create(args CreatePoolArgs) error {
 		return err
 	}
 
+	// Collect all MSIs: default + user-specified
+	userAssignedIdentities := map[string]*armcompute.VirtualMachineScaleSetIdentityUserAssignedIdentitiesValue{
+		*msi.ID: {},
+	}
+	for _, id := range args.MSIIDs {
+		userAssignedIdentities[id] = &armcompute.VirtualMachineScaleSetIdentityUserAssignedIdentitiesValue{}
+	}
+
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
 	posgresName := fmt.Sprintf("k3apg%s", clusterHash)
 	storageAccountName := fmt.Sprintf("k3astorage%s", clusterHash)
@@ -321,10 +330,8 @@ func Create(args CreatePoolArgs) error {
 			"k3a": to.Ptr(role),
 		},
 		Identity: &armcompute.VirtualMachineScaleSetIdentity{
-			Type: to.Ptr(armcompute.ResourceIdentityTypeUserAssigned),
-			UserAssignedIdentities: map[string]*armcompute.VirtualMachineScaleSetIdentityUserAssignedIdentitiesValue{
-				*msi.ID: {},
-			},
+			Type:                   to.Ptr(armcompute.ResourceIdentityTypeUserAssigned),
+			UserAssignedIdentities: userAssignedIdentities,
 		},
 		Properties: &armcompute.VirtualMachineScaleSetProperties{
 			UpgradePolicy: &armcompute.UpgradePolicy{

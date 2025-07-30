@@ -87,7 +87,7 @@ func ListInstances(args ListInstancesArgs) error {
 	vmssName := args.PoolName + "-vmss"
 	pager := vmssVMsClient.NewListPager(args.Cluster, vmssName, nil)
 
-	tbl := table.New("ID", "NAME", "SKU", "ZONE", "STATUS", "LATEST MODEL")
+	tbl := table.New("ID", "NAME", "HOSTNAME", "SKU", "ZONE", "STATUS", "LATEST MODEL")
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
 		if err != nil {
@@ -114,6 +114,10 @@ func ListInstances(args ListInstancesArgs) error {
 			if vm.Zones != nil && len(vm.Zones) > 0 {
 				zone = *vm.Zones[0]
 			}
+			hostname := "-"
+			if vm.Properties != nil && vm.Properties.OSProfile != nil && vm.Properties.OSProfile.ComputerName != nil {
+				hostname = *vm.Properties.OSProfile.ComputerName
+			}
 			latestModel := "-"
 			if vm.Properties != nil && vm.Properties.LatestModelApplied != nil {
 				if *vm.Properties.LatestModelApplied {
@@ -122,7 +126,7 @@ func ListInstances(args ListInstancesArgs) error {
 					latestModel = "no"
 				}
 			}
-			tbl.AddRow(id, name, size, zone, status, latestModel)
+			tbl.AddRow(id, name, hostname, size, zone, status, latestModel)
 		}
 	}
 	tbl.Print()
