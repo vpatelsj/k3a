@@ -13,7 +13,7 @@ Managing Kubernetes clusters and networking in Azure can be complex. k3a address
 - **Opinionated:** Secure-by-default configurations and best practices are built in.
 - **Secure:** Automated NSG rules and sensible defaults to help protect workloads.
 - **Microservice-Ready:** Suitable for deploying microservices on Kubernetes, from single-node clusters to larger deployments.
-- **Batteries Included & Upgradeable:** Provides a production-ready baseline, but you can add features such as HPA (Horizontal Pod Autoscaler), MSI-based ACR pull, and others as your requirements evolve.
+- **Batteries Included & Upgradeable:** Provides a production-ready baseline with integrated ACR support via automated imagePullSecret creation using MSI authentication, and you can add features such as HPA (Horizontal Pod Autoscaler) and others as your requirements evolve.
 
 **Intended Users:**
 - Developers who need to deploy secure, production-ready clusters quickly
@@ -35,15 +35,15 @@ Managing Kubernetes clusters and networking in Azure can be complex. k3a address
 Clone the repository and build the CLI:
 
 ```sh
-git clone https://github.com/your-org/k3a.git
+git clone https://github.com/jwilder/k3a.git
 cd k3a
-go build -o k3a ./cmd
+go build -o k3a ./cmd/k3a
 ```
 
 Or install directly with Go:
 
 ```sh
-go install github.com/your-org/k3a/cmd@latest
+go install github.com/jwilder/k3a/cmd/k3a@latest
 ```
 
 ### Configuration
@@ -64,17 +64,53 @@ Or specify the cluster and subscription with the `--cluster` and `--subscription
 
 ## Usage Examples
 
+### Available Commands
+
+k3a provides the following main command groups:
+
+- **`cluster`** - Create, list, and delete k3s clusters
+- **`pool`** - Manage node pools (create, list, scale, delete, update)
+- **`nsg`** - Manage network security groups and rules
+- **`acr`** - Manage Azure Container Registry instances and imagePullSecrets
+- **`loadbalancer`** - Manage load balancers and rules
+- **`kubeconfig`** - Get kubeconfig for cluster access
+
 ### Create a New Cluster
 
 ```sh
 k3a cluster create --cluster my-cluster --region eastus
 ```
 
+**Advanced Options:**
+
+```sh
+# Create cluster with custom PostgreSQL SKU for better performance
+k3a cluster create --cluster my-cluster --region eastus --postgres-sku Standard_D4s_v3
+
+# Create cluster with custom VNet address space and PostgreSQL SKU
+k3a cluster create --cluster my-cluster --region eastus --vnet-address-space 172.16.0.0/12 --postgres-sku Standard_D8s_v3
+```
+
+**Available PostgreSQL SKUs:**
+- `Standard_D2s_v3` (default) - 2 vCPUs, 8 GB RAM
+- `Standard_D4s_v3` - 4 vCPUs, 16 GB RAM  
+- `Standard_D8s_v3` - 8 vCPUs, 32 GB RAM
+- `Standard_D16s_v3` - 16 vCPUs, 64 GB RAM
+- `Standard_D32s_v3` - 32 vCPUs, 128 GB RAM
+
 ### List Clusters
 
 ```sh
 k3a cluster list
 ```
+
+### Get Cluster Kubeconfig
+
+```sh
+k3a kubeconfig --cluster my-cluster
+```
+
+This command downloads the kubeconfig file from the cluster and configures kubectl to access your k3s cluster.
 
 ### Create an NSG Rule
 
@@ -106,6 +142,34 @@ k3a nsg rule delete --cluster my-cluster --name allow-ssh
 k3a pool create --cluster my-cluster --name worker-pool --role worker --instance-count 3
 ```
 
+**Advanced Pool Creation Options:**
+
+```sh
+# Create pool with custom VM SKU for better performance
+k3a pool create --cluster my-cluster --name high-perf-workers --role worker --instance-count 2 --sku Standard_D4s_v3
+
+# Create pool with custom OS disk size and K8s version
+k3a pool create --cluster my-cluster --name worker-pool --role worker --instance-count 3 --sku Standard_D8s_v3 --os-disk-size 100 --k8s-version v1.33.1
+
+# Create control plane pool with specific configuration
+k3a pool create --cluster my-cluster --name control-plane --role control-plane --instance-count 3 --sku Standard_D4s_v3 --os-disk-size 50
+```
+
+**Available VM SKUs:**
+- `Standard_D2s_v3` (default) - 2 vCPUs, 8 GB RAM
+- `Standard_D4s_v3` - 4 vCPUs, 16 GB RAM
+- `Standard_D8s_v3` - 8 vCPUs, 32 GB RAM  
+- `Standard_D16s_v3` - 16 vCPUs, 64 GB RAM
+- `Standard_D32s_v3` - 32 vCPUs, 128 GB RAM
+
+**Pool Creation Flags:**
+- `--sku` - VM size/type (default: Standard_D2s_v3)
+- `--instance-count` - Number of VMs in the pool (default: 1)
+- `--os-disk-size` - OS disk size in GB (default: 30)
+- `--k8s-version` - Kubernetes version (default: v1.33.1)
+- `--role` - Pool role: control-plane or worker (default: control-plane)
+- `--msi` - Additional managed service identity IDs (optional)
+
 ### List Node Pools
 
 ```sh
@@ -122,6 +186,67 @@ k3a pool scale --cluster my-cluster --name worker-pool --instance-count 5
 
 ```sh
 k3a pool delete --cluster my-cluster --name worker-pool
+```
+
+### Manage Load Balancers
+
+```sh
+# List load balancers
+k3a loadbalancer list --cluster my-cluster
+
+# Create load balancer rule
+k3a loadbalancer rule create --cluster my-cluster --name web-rule --protocol Tcp --frontend-port 80 --backend-port 80
+
+# List load balancer rules
+k3a loadbalancer rule list --cluster my-cluster
+
+# Delete load balancer rule
+k3a loadbalancer rule delete --cluster my-cluster --name web-rule
+```
+
+### Create an Azure Container Registry (ACR)
+
+```sh
+k3a acr create --cluster my-cluster --name myregistryname --region eastus --sku Standard
+```
+
+This command creates an Azure Container Registry for storing container images.
+
+### Create ACR imagePullSecret
+
+```sh
+k3a acr create-secret --cluster my-cluster --name myregistryname --secret-name acr-secret
+```
+
+This command automatically creates a Kubernetes imagePullSecret that allows your cluster to pull images from the ACR. The secret uses Azure CLI authentication tokens and is ready to use immediately.
+
+Then reference the secret in your pod specs:
+
+```yaml
+spec:
+  containers:
+  - name: my-app
+    image: myregistryname.azurecr.io/my-app:latest
+  imagePullSecrets:
+  - name: acr-secret
+```
+
+### List ACR Instances
+
+```sh
+k3a acr list --cluster my-cluster
+```
+
+### Create ACR imagePullSecret
+
+```sh
+k3a acr create-secret --cluster my-cluster --name myregistryname --secret-name acr-secret
+```
+
+### Delete an ACR Instance
+
+```sh
+k3a acr delete --cluster my-cluster --name myregistryname
 ```
 
 ## Contributing

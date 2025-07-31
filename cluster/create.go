@@ -28,11 +28,34 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
 )
 
+// assignRoleWithRetry attempts to assign a role with exponential backoff retry for PrincipalNotFound errors
+func assignRoleWithRetry(ctx context.Context, client *armauthorization.RoleAssignmentsClient, scope, name string, params armauthorization.RoleAssignmentCreateParameters, maxRetries int) error {
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		_, err := client.Create(ctx, scope, name, params, nil)
+		if err == nil {
+			return nil
+		}
+
+		// Check if it's a PrincipalNotFound error
+		if strings.Contains(err.Error(), "PrincipalNotFound") && attempt < maxRetries-1 {
+			// Wait with exponential backoff: 2^attempt * 5 seconds
+			waitTime := time.Duration(1<<uint(attempt)) * 5 * time.Second
+			fmt.Printf("Principal not found (attempt %d/%d), retrying in %v...\n", attempt+1, maxRetries, waitTime)
+			time.Sleep(waitTime)
+			continue
+		}
+
+		return err
+	}
+	return fmt.Errorf("failed to assign role after %d attempts", maxRetries)
+}
+
 type CreateArgs struct {
 	SubscriptionID   string
 	Cluster          string
 	Location         string
 	VnetAddressSpace string
+	PostgresSKU      string
 }
 
 // createResourceGroup creates an Azure resource group
@@ -87,32 +110,32 @@ func createKeyVault(ctx context.Context, subscriptionID, cluster, location, vnet
 	keyVaultID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.KeyVault/vaults/%s", subscriptionID, cluster, keyVaultName)
 	certAdminRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/a4417e6f-fecd-4de8-b567-7b0420556985", subscriptionID)
 	certAdminRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "a4417e6f-fecd-4de8-b567-7b0420556985")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, certAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = assignRoleWithRetry(ctx, roleAssignmentsClient, keyVaultID, certAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(certAdminRoleDefID),
 		},
-	}, nil); err != nil {
+	}, 5); err != nil {
 		return "", fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
 	secretAdminRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7", subscriptionID)
 	secretAdminRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "b86a8fe4-44ce-4948-aee5-eccb2c155cd7")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, secretAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = assignRoleWithRetry(ctx, roleAssignmentsClient, keyVaultID, secretAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(secretAdminRoleDefID),
 		},
-	}, nil); err != nil {
+	}, 5); err != nil {
 		return "", fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
 	certOfficerRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/14b46e9e-c2b7-41b4-b07b-48a6ebf60603", subscriptionID)
 	certOfficerRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "14b46e9e-c2b7-41b4-b07b-48a6ebf60603")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, certOfficerRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = assignRoleWithRetry(ctx, roleAssignmentsClient, keyVaultID, certOfficerRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(certOfficerRoleDefID),
 		},
-	}, nil); err != nil {
+	}, 5); err != nil {
 		return "", fmt.Errorf("failed to assign Key Vault Certificate Officer role to MSI: %w", err)
 	}
 	callingPrincipalRoleName := kstrings.DeterministicGUID(keyVaultID + callingPrincipalID + "b86a8fe4-44ce-4948-aee5-eccb2c155cd7")
@@ -254,6 +277,9 @@ func Create(args CreateArgs) error {
 		return err
 	}
 
+	// Wait for MSI to replicate in Azure AD before assigning roles
+	time.Sleep(30 * time.Second)
+
 	callingPrincipalID, err := getCurrentPrincipalID(ctx, cred)
 	if err != nil {
 		return err
@@ -296,12 +322,12 @@ func Create(args CreateArgs) error {
 	roleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe", subscriptionID)
 	storageAccountID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Storage/storageAccounts/%s", subscriptionID, cluster, storageName)
 	roleAssignmentName := kstrings.DeterministicGUID(storageAccountID + msiID + "ba92f5b4-2d11-453d-a403-e96b0029c9fe")
-	_, err = roleAssignmentsClient.Create(ctx, storageAccountID, roleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+	err = assignRoleWithRetry(ctx, roleAssignmentsClient, storageAccountID, roleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(roleDefID),
 		},
-	}, nil)
+	}, 5)
 	if err != nil {
 		return fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
@@ -309,12 +335,12 @@ func Create(args CreateArgs) error {
 	// Assign 'Storage Table Data Contributor' role to the MSI
 	tableRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3", subscriptionID)
 	tableRoleAssignmentName := kstrings.DeterministicGUID(storageAccountID + msiID + "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3")
-	_, err = roleAssignmentsClient.Create(ctx, storageAccountID, tableRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+	err = assignRoleWithRetry(ctx, roleAssignmentsClient, storageAccountID, tableRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(tableRoleDefID),
 		},
-	}, nil)
+	}, 5)
 	if err != nil {
 		return fmt.Errorf("failed to assign Table Data Contributor role to MSI: %w", err)
 	}
@@ -333,7 +359,7 @@ func Create(args CreateArgs) error {
 
 	clusterHash := kstrings.UniqueString(cluster)
 	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, cred); err != nil {
+	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, cred); err != nil {
 		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
 	}
 
@@ -472,11 +498,16 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 }
 
 // createPostgresFlexibleServer provisions an Azure PostgreSQL Flexible Server matching the Bicep module configuration
-func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash string, cred *azidentity.DefaultAzureCredential) error {
+func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash, postgresSKU string, cred *azidentity.DefaultAzureCredential) error {
 	serverName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
 	serversClient, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create postgres servers client: %w", err)
+	}
+
+	// Use default SKU if none provided
+	if postgresSKU == "" {
+		postgresSKU = "Standard_D2s_v3"
 	}
 
 	// Build the delegated subnet resource ID
@@ -517,7 +548,7 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 			},
 		},
 		SKU: &armpostgresqlflexibleservers.SKU{
-			Name: to.Ptr("Standard_D2s_v3"),
+			Name: to.Ptr(postgresSKU),
 			Tier: to.Ptr(armpostgresqlflexibleservers.SKUTierGeneralPurpose),
 		},
 	}
@@ -703,12 +734,12 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 	privateDnsZoneID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
 	privateDnsRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/b12aa53e-6015-4669-85d0-8515ebb3ae7f", subscriptionID)
 	privateDnsRoleAssignmentName := kstrings.DeterministicGUID(privateDnsZoneID + msiID + "b12aa53e-6015-4669-85d0-8515ebb3ae7f")
-	_, err = roleAssignmentsClient.Create(ctx, privateDnsZoneID, privateDnsRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+	err = assignRoleWithRetry(ctx, roleAssignmentsClient, privateDnsZoneID, privateDnsRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(privateDnsRoleDefID),
 		},
-	}, nil)
+	}, 5)
 	if err != nil {
 		return fmt.Errorf("failed to assign Private DNS Zone Contributor role to MSI: %w", err)
 	}
