@@ -107,7 +107,7 @@ runcmd:
   - export POSTGRES_PASSWORD_ESCAPED=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['POSTGRES_PASSWORD']))")
   - |
     {{- if eq .Role "control-plane" }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=10.0.0.0/8 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=500 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=10.0.0.0/6 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=1000 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
 
     systemctl daemon-reload
     systemctl enable --now k3s-update-peer.service
@@ -127,6 +127,15 @@ runcmd:
     done
 
     {{- else }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443 --node-label node-role.kubernetes.io/worker=worker
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443 --kubelet-arg=max-pods=1000
+    
+    # Wait for k3s to be ready, then label this node as worker
+    while ! kubectl --kubeconfig=/var/lib/rancher/k3s/agent/kubelet.kubeconfig get nodes $(hostname) >/dev/null 2>&1; do
+      echo "Waiting for node to be ready..."
+      sleep 10
+    done
+    
+    # Label this node as a worker
+    kubectl --kubeconfig=/var/lib/rancher/k3s/agent/kubelet.kubeconfig label node $(hostname) node-role.kubernetes.io/worker=worker --overwrite
     sleep 5
     {{- end }}
