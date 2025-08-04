@@ -92,34 +92,6 @@ write_files:
 
       [Install]
       WantedBy=multi-user.target
-  - path: /usr/local/bin/watch-and-label-nodes.sh
-    permissions: '0755'
-    content: |
-      #!/bin/bash
-      while true; do
-        kubectl get nodes -o json | jq -r '.items[] | select((.metadata.labels["node-role.kubernetes.io/worker"] == null) and (.metadata.labels["node-role.kubernetes.io/control-plane"] == null) and ((now - (.metadata.creationTimestamp | fromdateiso8601)) > 10)) | .metadata.name' | while read -r node; do
-          kubectl label node "$node" node-role.kubernetes.io/worker=worker --overwrite
-        done
-        sleep 60
-      done
-  - path: /etc/systemd/system/k3s-node-labeler.service
-    permissions: '0644'
-    content: |
-      [Unit]
-      Description=K3s Node Auto-Labeler
-      After=network-online.target k3s.service
-      Wants=network-online.target
-
-      [Service]
-      Type=simple
-      ExecStart=/usr/local/bin/watch-and-label-nodes.sh
-      Restart=always
-      RestartSec=10
-      StandardOutput=journal
-      StandardError=journal
-
-      [Install]
-      WantedBy=multi-user.target
 {{- end }}
 
 runcmd:
@@ -135,10 +107,9 @@ runcmd:
   - export POSTGRES_PASSWORD_ESCAPED=$(python3 -c "import urllib.parse,os; print(urllib.parse.quote(os.environ['POSTGRES_PASSWORD']))")
   - |
     {{- if eq .Role "control-plane" }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=10.0.0.0/8 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=500 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
 
     systemctl daemon-reload
-    systemctl enable --now k3s-node-labeler.service
     systemctl enable --now k3s-update-peer.service
 
     # Upload kubeconfig to Key Vault with external IP
@@ -156,6 +127,6 @@ runcmd:
     done
 
     {{- else }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443 --node-label node-role.kubernetes.io/worker=worker
     sleep 5
     {{- end }}

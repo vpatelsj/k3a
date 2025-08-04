@@ -469,14 +469,14 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 				{
 					Name: to.Ptr("default"),
 					Properties: &armnetwork.SubnetPropertiesFormat{
-						AddressPrefix:        to.Ptr("10.1.0.0/16"),
+						AddressPrefix:        to.Ptr("10.0.0.0/12"),
 						NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
 					},
 				},
 				{
 					Name: to.Ptr("postgres"),
 					Properties: &armnetwork.SubnetPropertiesFormat{
-						AddressPrefix:        to.Ptr("10.2.0.0/24"),
+						AddressPrefix:        to.Ptr("10.16.0.0/24"),
 						NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
 						Delegations: []*armnetwork.Delegation{
 							{
