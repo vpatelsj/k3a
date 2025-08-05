@@ -12,7 +12,7 @@ EXPONENTIAL_FACTOR="${EXPONENTIAL_FACTOR:-2}"  # Factor to multiply batch size e
 MAX_NODES="${MAX_NODES:-100}"  # Maximum total nodes to create
 MAX_BATCHES="${MAX_BATCHES:-10}"  # Maximum number of batches as a safety limit
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-3000}"  # seconds to wait for nodes to become ready
-KUBEMARK_IMAGE="${KUBEMARK_IMAGE:-acrvapa17.azurecr.io/kubemark:latest}"
+KUBEMARK_IMAGE="${KUBEMARK_IMAGE:-acrvapa18.azurecr.io/kubemark:latest}"
 PERFORMANCE_WAIT="${PERFORMANCE_WAIT:-30}"  # seconds to wait after batch before measuring performance
 PERFORMANCE_TESTS="${PERFORMANCE_TESTS:-5}"  # number of API calls to test for performance measurement
 
@@ -1055,7 +1055,7 @@ metadata:
     node-id: "hollow-node-$j"
 spec:
   imagePullSecrets:
-  - name: acrvapa17-secret
+  - name: acrvapa18-secret
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -1102,9 +1102,6 @@ spec:
       "--node-labels=kubemark=true,incremental-test=true,batch=batch-$batch_number",
       "--max-pods=110",
       "--use-host-image-service=false",
-      "--node-lease-duration-seconds=40",
-      "--node-status-update-frequency=10s",
-      "--node-status-report-frequency=5m",
       "--v=4"
     ]
     volumeMounts:
@@ -1255,28 +1252,40 @@ setup_environment() {
     
     kubectl create namespace "$TEST_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
     
-    if kubectl get secret sternvapa17-secret -n default >/dev/null 2>&1; then
+    if kubectl get secret acrvapa18-secret -n default >/dev/null 2>&1; then
+        log_info "Copying acrvapa18-secret for image pull authentication..."
+        kubectl get secret acrvapa18-secret -n default -o yaml | \
+        sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
+        kubectl apply -f -
+    elif kubectl get secret sternvapa17-secret -n default >/dev/null 2>&1; then
+        log_info "Copying sternvapa17-secret for image pull authentication..."
+        kubectl get secret sternvapa17-secret -n default -o yaml | \
+        sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
+        sed "s/name: sternvapa17-secret/name: acrvapa18-secret/" | \
+        kubectl apply -f -
+    elif kubectl get secret acrvapa17-secret -n default >/dev/null 2>&1; then
         log_info "Copying acrvapa17-secret for image pull authentication..."
         kubectl get secret acrvapa17-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
+        sed "s/name: acrvapa17-secret/name: acrvapa18-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acr-test-secret -n default >/dev/null 2>&1; then
         log_info "Copying ACR secret for image pull authentication..."
         kubectl get secret acr-test-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acr-test-secret/name: acrvapa17-secret/" | \
+        sed "s/name: acr-test-secret/name: acrvapa18-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acrvapa10-secret -n default >/dev/null 2>&1; then
         log_info "Copying acrvapa10-secret for image pull authentication..."
         kubectl get secret acrvapa10-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acrvapa10-secret/name: acr-test-secret/" | \
+        sed "s/name: acrvapa10-secret/name: acrvapa18-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acr-secret -n default >/dev/null 2>&1; then
         log_info "Copying ACR secret for image pull authentication..."
         kubectl get secret acr-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acr-secret/name: acr-test-secret/" | \
+        sed "s/name: acr-secret/name: acrvapa18-secret/" | \
         kubectl apply -f -
     else
         log_warn "No ACR secret found in default namespace. Image pull may fail for private registries."
