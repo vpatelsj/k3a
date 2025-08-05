@@ -51,11 +51,12 @@ func assignRoleWithRetry(ctx context.Context, client *armauthorization.RoleAssig
 }
 
 type CreateArgs struct {
-	SubscriptionID   string
-	Cluster          string
-	Location         string
-	VnetAddressSpace string
-	PostgresSKU      string
+	SubscriptionID       string
+	Cluster              string
+	Location             string
+	VnetAddressSpace     string
+	PostgresSKU          string
+	PostgresPublicAccess bool
 }
 
 // createResourceGroup creates an Azure resource group
@@ -359,7 +360,7 @@ func Create(args CreateArgs) error {
 
 	clusterHash := kstrings.UniqueString(cluster)
 	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, cred); err != nil {
+	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresPublicAccess, cred); err != nil {
 		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
 	}
 
@@ -498,7 +499,7 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 }
 
 // createPostgresFlexibleServer provisions an Azure PostgreSQL Flexible Server matching the Bicep module configuration
-func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash, postgresSKU string, cred *azidentity.DefaultAzureCredential) error {
+func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash, postgresSKU string, publicAccess bool, cred *azidentity.DefaultAzureCredential) error {
 	serverName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
 	serversClient, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
 	if err != nil {
@@ -513,18 +514,38 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 	// Build the delegated subnet resource ID
 	delegatedSubnetResourceID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s-vnet/subnets/postgres", subscriptionID, resourceGroup, vnetNamePrefix)
 
-	// Ensure the private DNS zone exists before creating the Postgres server
-	privateDnsZoneName := serverName + ".private.postgres.database.azure.com"
-	privateDnsZoneArmResourceId := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
-	privateDnsZonesClient, err := armprivatedns.NewPrivateZonesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zones client: %w", err)
+	var privateDnsZoneArmResourceId string
+	// Only create private DNS zone for private access
+	if !publicAccess {
+		// Ensure the private DNS zone exists before creating the Postgres server
+		privateDnsZoneName := serverName + ".private.postgres.database.azure.com"
+		privateDnsZoneArmResourceId = fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
+		privateDnsZonesClient, err := armprivatedns.NewPrivateZonesClient(subscriptionID, cred, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create private DNS zones client: %w", err)
+		}
+		_, err = privateDnsZonesClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, armprivatedns.PrivateZone{
+			Location: to.Ptr("global"),
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create or update private DNS zone: %w", err)
+		}
 	}
-	_, err = privateDnsZonesClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, armprivatedns.PrivateZone{
-		Location: to.Ptr("global"),
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create or update private DNS zone: %w", err)
+
+	// Configure network access based on public access flag
+	var networkConfig *armpostgresqlflexibleservers.Network
+	if publicAccess {
+		// Public access configuration - no delegated subnet or private DNS zone
+		networkConfig = &armpostgresqlflexibleservers.Network{
+			PublicNetworkAccess: to.Ptr(armpostgresqlflexibleservers.ServerPublicNetworkAccessStateEnabled),
+		}
+	} else {
+		// Private access configuration - use delegated subnet and private DNS zone
+		networkConfig = &armpostgresqlflexibleservers.Network{
+			DelegatedSubnetResourceID:   to.Ptr(delegatedSubnetResourceID),
+			PrivateDNSZoneArmResourceID: to.Ptr(privateDnsZoneArmResourceId),
+			PublicNetworkAccess:         to.Ptr(armpostgresqlflexibleservers.ServerPublicNetworkAccessStateDisabled),
+		}
 	}
 
 	parameters := armpostgresqlflexibleservers.Server{
@@ -542,10 +563,7 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 			Backup: &armpostgresqlflexibleservers.Backup{
 				BackupRetentionDays: to.Ptr[int32](7),
 			},
-			Network: &armpostgresqlflexibleservers.Network{
-				DelegatedSubnetResourceID:   to.Ptr(delegatedSubnetResourceID),
-				PrivateDNSZoneArmResourceID: to.Ptr(privateDnsZoneArmResourceId),
-			},
+			Network: networkConfig,
 		},
 		SKU: &armpostgresqlflexibleservers.SKU{
 			Name: to.Ptr(postgresSKU),
@@ -562,23 +580,56 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 		return fmt.Errorf("failed to create postgres server: %w", err)
 	}
 
-	// Link the Postgres private DNS zone to the VNet
-	vnetLinksClient, err := armprivatedns.NewVirtualNetworkLinksClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet links client: %w", err)
-	}
-	vnetName := vnetNamePrefix + "-vnet"
-	_, err = vnetLinksClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, "postgres-vnet-link", armprivatedns.VirtualNetworkLink{
-		Location: to.Ptr("global"),
-		Properties: &armprivatedns.VirtualNetworkLinkProperties{
-			VirtualNetwork: &armprivatedns.SubResource{
-				ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, resourceGroup, vnetName)),
+	// Link the Postgres private DNS zone to the VNet (only for private access)
+	if !publicAccess {
+		privateDnsZoneName := serverName + ".private.postgres.database.azure.com"
+		vnetLinksClient, err := armprivatedns.NewVirtualNetworkLinksClient(subscriptionID, cred, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create private DNS zone vnet links client: %w", err)
+		}
+		vnetName := vnetNamePrefix + "-vnet"
+		_, err = vnetLinksClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, "postgres-vnet-link", armprivatedns.VirtualNetworkLink{
+			Location: to.Ptr("global"),
+			Properties: &armprivatedns.VirtualNetworkLinkProperties{
+				VirtualNetwork: &armprivatedns.SubResource{
+					ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, resourceGroup, vnetName)),
+				},
+				RegistrationEnabled: to.Ptr(false),
 			},
-			RegistrationEnabled: to.Ptr(false),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Postgres private DNS zone vnet link: %w", err)
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create Postgres private DNS zone vnet link: %w", err)
+		}
+	} else {
+		// For public access, create firewall rule to allow access from Azure services and optionally from all IPs
+		// Note: In production, you should restrict this to specific IP ranges
+		firewallRulesClient, err := armpostgresqlflexibleservers.NewFirewallRulesClient(subscriptionID, cred, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create firewall rules client: %w", err)
+		}
+
+		// Allow access from Azure services
+		_, err = firewallRulesClient.BeginCreateOrUpdate(ctx, resourceGroup, serverName, "AllowAllAzureIps", armpostgresqlflexibleservers.FirewallRule{
+			Properties: &armpostgresqlflexibleservers.FirewallRuleProperties{
+				StartIPAddress: to.Ptr("0.0.0.0"),
+				EndIPAddress:   to.Ptr("0.0.0.0"),
+			},
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create Azure services firewall rule: %w", err)
+		}
+
+		// Allow access from all IPs (for development purposes)
+		// In production, you should replace this with specific IP ranges
+		_, err = firewallRulesClient.BeginCreateOrUpdate(ctx, resourceGroup, serverName, "AllowAllIPs", armpostgresqlflexibleservers.FirewallRule{
+			Properties: &armpostgresqlflexibleservers.FirewallRuleProperties{
+				StartIPAddress: to.Ptr("0.0.0.0"),
+				EndIPAddress:   to.Ptr("255.255.255.255"),
+			},
+		}, nil)
+		if err != nil {
+			return fmt.Errorf("failed to create public access firewall rule: %w", err)
+		}
 	}
 
 	return nil
