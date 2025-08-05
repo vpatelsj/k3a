@@ -990,6 +990,33 @@ EOF
     log_info "Kubeconfig secret created for hollow nodes"
 }
 
+# Function to find the next available node number (handles gaps in numbering)
+get_next_available_node_number() {
+    log_info "Finding next available node number..."
+    local node_names_result=$(get_kubemark_node_names)
+    local existing_numbers=()
+    
+    # Collect all existing node numbers
+    while IFS= read -r node_name; do
+        if [[ "$node_name" =~ hollow-node-([0-9]+)$ ]]; then
+            existing_numbers+=("${BASH_REMATCH[1]}")
+        fi
+    done <<< "$node_names_result"
+    
+    # Sort the numbers
+    if [[ ${#existing_numbers[@]} -gt 0 ]]; then
+        IFS=$'\n' existing_numbers=($(sort -n <<< "${existing_numbers[*]}"))
+        
+        # Find the highest number for sequential allocation
+        local highest_num=${existing_numbers[-1]}
+        log_info "Found existing nodes: ${existing_numbers[*]}"
+        log_info "Highest existing number: $highest_num"
+        echo $((highest_num + 1))
+    else
+        echo 1
+    fi
+}
+
 # Function to calculate next batch size exponentially (unchanged from original)
 calculate_batch_size() {
     local batch_number="$1"
@@ -1410,6 +1437,13 @@ EOF
     local existing_counts=$(get_kubemark_node_counts true)
     IFS=':' read -r existing_registered existing_ready <<< "$existing_counts"
     
+    # Validate the existing counts
+    if [[ ! "$existing_registered" =~ ^[0-9]+$ ]]; then
+        log_warn "Invalid existing node count, treating as 0"
+        existing_registered=0
+        existing_ready=0
+    fi
+    
     if [[ $existing_registered -gt 0 ]]; then
         log_info "Found $existing_registered existing kubemark nodes ($existing_ready ready)"
         
@@ -1422,17 +1456,8 @@ EOF
         
         # Find the highest existing node number to avoid conflicts
         log_info "Detecting highest existing node number to avoid conflicts..."
-        local node_names_result=$(get_kubemark_node_names)
-        local highest_node_num=0
-        
-        while IFS= read -r node_name; do
-            if [[ "$node_name" =~ hollow-node-([0-9]+)$ ]]; then
-                local node_num="${BASH_REMATCH[1]}"
-                if [[ $node_num -gt $highest_node_num ]]; then
-                    highest_node_num=$node_num
-                fi
-            fi
-        done <<< "$node_names_result"
+        local highest_node_num=$(get_next_available_node_number)
+        highest_node_num=$((highest_node_num - 1))  # Convert back to highest existing
         
         log_info "Highest existing node number: $highest_node_num"
         log_info "Will start new nodes from hollow-node-$((highest_node_num + 1))"
@@ -1447,6 +1472,7 @@ EOF
         log_info "Will create $remaining_nodes additional nodes (from $((highest_node_num + 1)) to $((highest_node_num + remaining_nodes)))"
         
         # Update MAX_NODES to reflect only the additional nodes needed
+        local original_max_nodes=$MAX_NODES
         MAX_NODES=$remaining_nodes
         
         # Recalculate batches plan with adjusted numbers
@@ -1462,9 +1488,28 @@ EOF
             echo "  Batch $batch_num: $batch_size nodes (total: $running_total)"
         done
         echo ""
+        
+        log_info "📊 Execution Plan Summary:"
+        log_info "  • Existing nodes: $existing_registered ($existing_ready ready)"
+        log_info "  • Nodes to add: $remaining_nodes"
+        log_info "  • Final target: $original_max_nodes total nodes"
+        log_info "  • Starting from: hollow-node-$((highest_node_num + 1))"
+        log_info "  • Ending at: hollow-node-$((highest_node_num + remaining_nodes))"
+        echo ""
+        
+        # Store the original target for final reporting
+        local final_target_nodes=$original_max_nodes
     else
         log_info "No existing kubemark nodes found, starting fresh"
         highest_node_num=0
+        local final_target_nodes=$MAX_NODES
+        
+        log_info "📊 Execution Plan Summary:"
+        log_info "  • Starting fresh with no existing nodes"
+        log_info "  • Nodes to create: $MAX_NODES"
+        log_info "  • Starting from: hollow-node-1"
+        log_info "  • Ending at: hollow-node-$MAX_NODES"
+        echo ""
     fi
     
     # Add batches incrementally
@@ -1502,8 +1547,8 @@ EOF
             sleep 10
         fi
         
-        if [[ $current_total_nodes -ge $MAX_NODES ]]; then
-            log_info "✋ Reached maximum nodes limit ($MAX_NODES), stopping..."
+        if [[ $current_total_nodes -ge $(( existing_registered + MAX_NODES )) ]]; then
+            log_info "✋ Reached maximum nodes limit ($(( existing_registered + MAX_NODES )), stopping..."
             break
         fi
     done
@@ -1515,14 +1560,14 @@ EOF
     log_info "Final Summary:"
     local final_counts=$(get_kubemark_node_counts true)
     IFS=':' read -r _ final_ready <<< "$final_counts"
-    log_info "  Target: $current_total_nodes hollow nodes"
+    log_info "  Target: $final_target_nodes hollow nodes"
     log_info "  Achieved: $final_ready ready nodes"
     log_info "  Total Batches: $total_batches"
     
-    if [[ $final_ready -eq $current_total_nodes ]]; then
+    if [[ $final_ready -eq $final_target_nodes ]]; then
         log_success "  ✅ All nodes successfully added!"
     else
-        log_warn "  ⚠️  Only $final_ready/$current_total_nodes nodes became ready"
+        log_warn "  ⚠️  Only $final_ready/$final_target_nodes nodes became ready"
     fi
     
     # Display performance summary
