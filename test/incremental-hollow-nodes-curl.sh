@@ -12,7 +12,7 @@ EXPONENTIAL_FACTOR="${EXPONENTIAL_FACTOR:-2}"  # Factor to multiply batch size e
 MAX_NODES="${MAX_NODES:-100}"  # Maximum total nodes to create
 MAX_BATCHES="${MAX_BATCHES:-10}"  # Maximum number of batches as a safety limit
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-3000}"  # seconds to wait for nodes to become ready
-KUBEMARK_IMAGE="${KUBEMARK_IMAGE:-acrvapa18.azurecr.io/kubemark:node-heartbeat-optimized-latest}"
+KUBEMARK_IMAGE="${KUBEMARK_IMAGE:-acrvapa22.azurecr.io/kubemark:node-heartbeat-optimized-latest}"
 PERFORMANCE_WAIT="${PERFORMANCE_WAIT:-30}"  # seconds to wait after batch before measuring performance
 PERFORMANCE_TESTS="${PERFORMANCE_TESTS:-5}"  # number of API calls to test for performance measurement
 
@@ -1071,7 +1071,7 @@ calculate_batches_plan() {
     echo "${batches_info[@]}"
 }
 
-# Function to create a batch of hollow nodes (unchanged from original)
+# Function to create a batch of hollow nodes using direct API calls for maximum speed
 create_hollow_node_batch() {
     local batch_number="$1"
     local batch_size="$2"
@@ -1079,9 +1079,260 @@ create_hollow_node_batch() {
     local end_idx="$4"
     
     log_batch "Creating batch $batch_number: hollow nodes $start_idx to $end_idx (batch size: $batch_size)"
+    log_info "Using direct API calls for maximum speed..."
+    
+    local start_time=$(date +%s.%3N 2>/dev/null || date +%s)
+    local created_count=0
+    local failed_count=0
+    
+    # Create pods using parallel direct API calls
+    local pids=()
+    local max_concurrent=100  # Limit concurrent API calls to avoid overwhelming the API server
     
     for (( j=start_idx; j<=end_idx; j++ )); do
-        cat <<EOF | kubectl apply -f - &
+        # Create pod JSON payload
+        local pod_json=$(cat <<EOF
+{
+  "apiVersion": "v1",
+  "kind": "Pod",
+  "metadata": {
+    "name": "hollow-node-$j",
+    "namespace": "$TEST_NAMESPACE",
+    "labels": {
+      "app": "hollow-node",
+      "batch": "batch-$batch_number",
+      "node-id": "hollow-node-$j"
+    }
+  },
+  "spec": {
+    "imagePullSecrets": [
+      {"name": "acrvapa22-secret"}
+    ],
+    "affinity": {
+      "nodeAffinity": {
+        "requiredDuringSchedulingIgnoredDuringExecution": {
+          "nodeSelectorTerms": [
+            {
+              "matchExpressions": [
+                {
+                  "key": "node-role.kubernetes.io/control-plane",
+                  "operator": "DoesNotExist"
+                },
+                {
+                  "key": "kubemark",
+                  "operator": "DoesNotExist"
+                },
+                {
+                  "key": "node-role.kubernetes.io/worker",
+                  "operator": "Exists"
+                },
+                {
+                  "key": "node.kubernetes.io/instance-type",
+                  "operator": "In",
+                  "values": ["k3s"]
+                }
+              ]
+            }
+          ]
+        }
+      },
+      "podAntiAffinity": {
+        "preferredDuringSchedulingIgnoredDuringExecution": [
+          {
+            "weight": 100,
+            "podAffinityTerm": {
+              "labelSelector": {
+                "matchLabels": {
+                  "app": "hollow-node"
+                }
+              },
+              "topologyKey": "kubernetes.io/hostname"
+            }
+          }
+        ]
+      }
+    },
+    "volumes": [
+      {
+        "name": "kubeconfig-volume",
+        "secret": {
+          "secretName": "hollow-node-kubeconfig"
+        }
+      },
+      {
+        "name": "logs-volume",
+        "emptyDir": {}
+      }
+    ],
+    "containers": [
+      {
+        "name": "hollow-kubelet",
+        "image": "$KUBEMARK_IMAGE",
+        "env": [
+          {
+            "name": "NODE_NAME",
+            "value": "hollow-node-$j"
+          }
+        ],
+        "command": [
+          "/go-runner",
+          "-log-file=/var/log/kubelet-hollow-node-$j.log",
+          "-also-stdout=true",
+          "/kubemark",
+          "--morph=kubelet",
+          "--name=hollow-node-$j",
+          "--kubeconfig=/kubeconfig/kubeconfig",
+          "--node-labels=kubemark=true,incremental-test=true,batch=batch-$batch_number",
+          "--max-pods=110",
+          "--use-host-image-service=false",
+          "--node-lease-duration-seconds=120",
+          "--node-status-update-frequency=60s",
+          "--node-status-report-frequency=15m",
+          "--v=4"
+        ],
+        "volumeMounts": [
+          {
+            "name": "kubeconfig-volume",
+            "mountPath": "/kubeconfig",
+            "readOnly": true
+          },
+          {
+            "name": "logs-volume",
+            "mountPath": "/var/log"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "20m",
+            "memory": "50Mi"
+          },
+          "limits": {
+            "cpu": "100m",
+            "memory": "200Mi"
+          }
+        }
+      },
+      {
+        "name": "hollow-proxy",
+        "image": "$KUBEMARK_IMAGE",
+        "env": [
+          {
+            "name": "NODE_NAME",
+            "value": "hollow-node-$j"
+          }
+        ],
+        "command": [
+          "/go-runner",
+          "-log-file=/var/log/kubeproxy-hollow-node-$j.log",
+          "-also-stdout=true",
+          "/kubemark",
+          "--morph=proxy",
+          "--name=hollow-node-$j",
+          "--kubeconfig=/kubeconfig/kubeconfig",
+          "--v=4"
+        ],
+        "volumeMounts": [
+          {
+            "name": "kubeconfig-volume",
+            "mountPath": "/kubeconfig",
+            "readOnly": true
+          },
+          {
+            "name": "logs-volume",
+            "mountPath": "/var/log"
+          }
+        ],
+        "resources": {
+          "requests": {
+            "cpu": "10m",
+            "memory": "25Mi"
+          },
+          "limits": {
+            "cpu": "50m",
+            "memory": "100Mi"
+          }
+        }
+      }
+    ],
+    "restartPolicy": "Always"
+  }
+}
+EOF
+)
+        
+        # Create pod via direct API call in background
+        (
+            local result=$(call_k8s_api "/api/v1/namespaces/$TEST_NAMESPACE/pods" "POST" "$pod_json")
+            local exit_code=$?
+            
+            if [[ $exit_code -eq 0 ]] && echo "$result" | jq -e '.kind == "Pod"' >/dev/null 2>&1; then
+                echo "SUCCESS:hollow-node-$j"
+            else
+                echo "FAILED:hollow-node-$j:$result"
+            fi
+        ) &
+        
+        pids+=($!)
+        
+        # Wait when we reach max concurrent API calls
+        if [[ ${#pids[@]} -ge $max_concurrent ]]; then
+            # Wait for all current processes to complete and count results
+            for pid in "${pids[@]}"; do
+                local result=$(wait "$pid"; echo "$?")
+                if [[ "$result" == "0" ]]; then
+                    ((created_count++))
+                else
+                    ((failed_count++))
+                fi
+            done
+            pids=()
+            
+            # Show progress
+            local completed=$((created_count + failed_count))
+            if [[ $completed -gt 0 && $(($completed % 20)) -eq 0 ]]; then
+                log_info "Progress: $completed/$batch_size pods processed ($created_count created, $failed_count failed)"
+            fi
+        fi
+    done
+    
+    # Wait for any remaining processes
+    for pid in "${pids[@]}"; do
+        local result=$(wait "$pid"; echo "$?")
+        if [[ "$result" == "0" ]]; then
+            ((created_count++))
+        else
+            ((failed_count++))
+        fi
+    done
+    
+    local end_time=$(date +%s.%3N 2>/dev/null || date +%s)
+    local duration=""
+    if [[ "$end_time" =~ ^[0-9.]+$ && "$start_time" =~ ^[0-9.]+$ ]]; then
+        duration=$(echo "scale=3; $end_time - $start_time" | bc -l 2>/dev/null || echo "N/A")
+    else
+        duration="N/A"
+    fi
+    
+    if [[ $failed_count -eq 0 ]]; then
+        log_success "✅ Direct API bulk creation completed in ${duration}s ($created_count/$batch_size pods created)"
+    else
+        log_warn "⚠️  Direct API creation completed in ${duration}s ($created_count/$batch_size pods created, $failed_count failed)"
+        
+        # Fallback for failed pods using kubectl
+        if [[ $failed_count -gt 0 && $created_count -lt $batch_size ]]; then
+            log_info "Attempting fallback creation for failed pods..."
+            local fallback_start_time=$(date +%s.%3N 2>/dev/null || date +%s)
+            
+            for (( j=start_idx; j<=end_idx; j++ )); do
+                # Check if pod already exists via API
+                local existing_pod=$(call_k8s_api "/api/v1/namespaces/$TEST_NAMESPACE/pods/hollow-node-$j" "GET" 2>/dev/null)
+                if echo "$existing_pod" | jq -e '.kind == "Pod"' >/dev/null 2>&1; then
+                    continue  # Pod already exists, skip
+                fi
+                
+                # Create missing pod with kubectl
+                log_info "Creating missing hollow-node-$j with kubectl..."
+                kubectl create -f - <<EOF
 apiVersion: v1
 kind: Pod
 metadata:
@@ -1093,7 +1344,7 @@ metadata:
     node-id: "hollow-node-$j"
 spec:
   imagePullSecrets:
-  - name: acrvapa18-secret
+  - name: acrvapa22-secret
   affinity:
     nodeAffinity:
       requiredDuringSchedulingIgnoredDuringExecution:
@@ -1188,11 +1439,20 @@ spec:
         memory: "100Mi"
   restartPolicy: Always
 EOF
-    done
+            done
+            
+            local fallback_end_time=$(date +%s.%3N 2>/dev/null || date +%s)
+            local fallback_duration=""
+            if [[ "$fallback_end_time" =~ ^[0-9.]+$ && "$fallback_start_time" =~ ^[0-9.]+$ ]]; then
+                fallback_duration=$(echo "scale=3; $fallback_end_time - $fallback_start_time" | bc -l 2>/dev/null || echo "N/A")
+            else
+                fallback_duration="N/A"
+            fi
+            log_info "Fallback creation completed in ${fallback_duration}s"
+        fi
+    fi
     
-    wait
-    
-    log_batch "Created batch $batch_number: hollow-node-$start_idx to hollow-node-$end_idx (batch size: $batch_size)"
+    log_batch "Created batch $batch_number: hollow-node-$start_idx to hollow-node-$end_idx (batch size: $batch_size, API duration: ${duration}s)"
 }
 
 # Function to wait for hollow nodes to become ready - optimized with curl
@@ -1293,40 +1553,46 @@ setup_environment() {
     
     kubectl create namespace "$TEST_NAMESPACE" --dry-run=client -o yaml | kubectl apply -f -
     
-    if kubectl get secret acrvapa18-secret -n default >/dev/null 2>&1; then
+    if kubectl get secret acrvapa22-secret -n default >/dev/null 2>&1; then
+        log_info "Copying acrvapa22-secret for image pull authentication..."
+        kubectl get secret acrvapa22-secret -n default -o yaml | \
+        sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
+        kubectl apply -f -
+    elif kubectl get secret acrvapa18-secret -n default >/dev/null 2>&1; then
         log_info "Copying acrvapa18-secret for image pull authentication..."
         kubectl get secret acrvapa18-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
+        sed "s/name: acrvapa18-secret/name: acrvapa22-secret/" | \
         kubectl apply -f -
     elif kubectl get secret sternvapa17-secret -n default >/dev/null 2>&1; then
         log_info "Copying sternvapa17-secret for image pull authentication..."
         kubectl get secret sternvapa17-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: sternvapa17-secret/name: acrvapa18-secret/" | \
+        sed "s/name: sternvapa17-secret/name: acrvapa22-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acrvapa17-secret -n default >/dev/null 2>&1; then
         log_info "Copying acrvapa17-secret for image pull authentication..."
         kubectl get secret acrvapa17-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acrvapa17-secret/name: acrvapa18-secret/" | \
+        sed "s/name: acrvapa17-secret/name: acrvapa22-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acr-test-secret -n default >/dev/null 2>&1; then
         log_info "Copying ACR secret for image pull authentication..."
         kubectl get secret acr-test-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acr-test-secret/name: acrvapa18-secret/" | \
+        sed "s/name: acr-test-secret/name: acrvapa22-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acrvapa10-secret -n default >/dev/null 2>&1; then
         log_info "Copying acrvapa10-secret for image pull authentication..."
         kubectl get secret acrvapa10-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acrvapa10-secret/name: acrvapa18-secret/" | \
+        sed "s/name: acrvapa10-secret/name: acrvapa22-secret/" | \
         kubectl apply -f -
     elif kubectl get secret acr-secret -n default >/dev/null 2>&1; then
         log_info "Copying ACR secret for image pull authentication..."
         kubectl get secret acr-secret -n default -o yaml | \
         sed "s/namespace: default/namespace: $TEST_NAMESPACE/" | \
-        sed "s/name: acr-secret/name: acrvapa18-secret/" | \
+        sed "s/name: acr-secret/name: acrvapa22-secret/" | \
         kubectl apply -f -
     else
         log_warn "No ACR secret found in default namespace. Image pull may fail for private registries."
