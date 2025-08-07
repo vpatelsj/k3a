@@ -554,8 +554,9 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 			AdministratorLogin:         to.Ptr(adminUsername),
 			AdministratorLoginPassword: to.Ptr(adminPassword),
 			Version:                    to.Ptr(armpostgresqlflexibleservers.ServerVersion("15")),
+			// 128GB storage automatically provides P10 performance tier with up to 2400 IOPS
 			Storage: &armpostgresqlflexibleservers.Storage{
-				StorageSizeGB: to.Ptr[int32](32),
+				StorageSizeGB: to.Ptr[int32](128),
 			},
 			HighAvailability: &armpostgresqlflexibleservers.HighAvailability{
 				Mode: to.Ptr(armpostgresqlflexibleservers.HighAvailabilityModeDisabled),

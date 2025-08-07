@@ -93,7 +93,7 @@ func init() {
 	createClusterCmd.Flags().String("region", "", "Azure region for the cluster (e.g., canadacentral) (required)")
 	createClusterCmd.Flags().String("vnet-address-space", "10.0.0.0/8", "VNet address space (CIDR, e.g. 10.0.0.0/8)")
 	createClusterCmd.Flags().String("postgres-sku", "Standard_D2s_v3", "PostgreSQL Flexible Server SKU (e.g., Standard_D2s_v3, Standard_D4s_v3)")
-	createClusterCmd.Flags().Bool("postgres-public-access", false, "Enable public network access for PostgreSQL server (default: false for private access)")
+	createClusterCmd.Flags().Bool("postgres-public-access", true, "Enable public network access for PostgreSQL server (default: true for public access)")
 	_ = createClusterCmd.MarkFlagRequired("region")
 
 	// Cluster delete flags

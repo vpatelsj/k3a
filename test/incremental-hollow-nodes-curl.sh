@@ -12,9 +12,14 @@ EXPONENTIAL_FACTOR="${EXPONENTIAL_FACTOR:-2}"  # Factor to multiply batch size e
 MAX_NODES="${MAX_NODES:-100}"  # Maximum total nodes to create
 MAX_BATCHES="${MAX_BATCHES:-10}"  # Maximum number of batches as a safety limit
 WAIT_TIMEOUT="${WAIT_TIMEOUT:-3000}"  # seconds to wait for nodes to become ready
-KUBEMARK_IMAGE="${KUBEMARK_IMAGE:-acrvapa18.azurecr.io/kubemark:latest}"
+KUBEMARK_IMAGE="${KUBEMARK_IMAGE:-acrvapa18.azurecr.io/kubemark:node-heartbeat-optimized-latest}"
 PERFORMANCE_WAIT="${PERFORMANCE_WAIT:-30}"  # seconds to wait after batch before measuring performance
 PERFORMANCE_TESTS="${PERFORMANCE_TESTS:-5}"  # number of API calls to test for performance measurement
+
+# Node lease and status update configuration for large clusters
+NODE_STATUS_UPDATE_FREQUENCY="${NODE_STATUS_UPDATE_FREQUENCY:-60s}"  # How often kubelet updates node status (default: 10s)
+NODE_LEASE_DURATION="${NODE_LEASE_DURATION:-120}"  # Node lease duration in seconds (default: 40s)
+NODE_MONITOR_GRACE_PERIOD="${NODE_MONITOR_GRACE_PERIOD:-240s}"  # Grace period for node monitoring (default: 40s)
 
 # Test namespace
 TEST_NAMESPACE="kubemark-incremental-test"
@@ -928,6 +933,12 @@ rules:
 - apiGroups: ["storage.k8s.io"]
   resources: ["volumeattachments"]
   verbs: ["get", "list", "watch"]
+- apiGroups: ["discovery.k8s.io"]
+  resources: ["endpointslices"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["servicecidrs"]
+  verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -952,7 +963,7 @@ EOF
     if [[ -n "$token_name" ]]; then
         token=$(kubectl get secret "$token_name" -n "$TEST_NAMESPACE" -o jsonpath='{.data.token}' | base64 -d)
     else
-        token=$(kubectl create token hollow-node-sa -n "$TEST_NAMESPACE" --duration=24h)
+        token=$(kubectl create token hollow-node-sa -n "$TEST_NAMESPACE" --duration=87600h)
     fi
     
     if [[ -z "$token" ]]; then
@@ -1129,6 +1140,9 @@ spec:
       "--node-labels=kubemark=true,incremental-test=true,batch=batch-$batch_number",
       "--max-pods=110",
       "--use-host-image-service=false",
+      "--node-lease-duration-seconds=120",
+      "--node-status-update-frequency=60s",
+      "--node-status-report-frequency=15m",
       "--v=4"
     ]
     volumeMounts:
@@ -1354,6 +1368,18 @@ main() {
                 PERFORMANCE_TESTS="$2"
                 shift 2
                 ;;
+            --node-status-frequency)
+                NODE_STATUS_UPDATE_FREQUENCY="$2"
+                shift 2
+                ;;
+            --node-lease-duration)
+                NODE_LEASE_DURATION="$2"
+                shift 2
+                ;;
+            --node-monitor-grace)
+                NODE_MONITOR_GRACE_PERIOD="$2"
+                shift 2
+                ;;
             --cleanup-only)
                 cleanup_test
                 exit 0
@@ -1374,6 +1400,9 @@ OPTIONS:
   --timeout SECONDS          Timeout to wait for each batch (default: $WAIT_TIMEOUT)
   --perf-wait SECONDS        Wait time before measuring performance (default: $PERFORMANCE_WAIT)
   --perf-tests NUM           Number of API calls per endpoint for performance test (default: $PERFORMANCE_TESTS)
+  --node-status-frequency STR Frequency of kubelet node status updates (default: $NODE_STATUS_UPDATE_FREQUENCY)
+  --node-lease-duration NUM   Node lease duration in seconds (default: $NODE_LEASE_DURATION)
+  --node-monitor-grace STR    Grace period for node monitoring (default: $NODE_MONITOR_GRACE_PERIOD)
   --cleanup-only             Only cleanup test resources
   -h, --help                 Show this help
 
@@ -1402,6 +1431,9 @@ EOF
     echo "  Performance Wait: ${PERFORMANCE_WAIT}s before measuring"
     echo "  Performance Tests: ${PERFORMANCE_TESTS} calls per endpoint"
     echo "  Kubemark Image: $KUBEMARK_IMAGE"
+    echo "  Node Status Update Frequency: $NODE_STATUS_UPDATE_FREQUENCY"
+    echo "  Node Lease Duration: ${NODE_LEASE_DURATION}s"
+    echo "  Node Monitor Grace Period: $NODE_MONITOR_GRACE_PERIOD"
     echo "  Optimization: curl + compression + table format"
     echo ""
     

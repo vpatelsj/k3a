@@ -54,6 +54,17 @@ var createPoolCmd = &cobra.Command{
 		k8sVersion, _ := cmd.Flags().GetString("k8s-version")
 		sku, _ := cmd.Flags().GetString("sku")
 		osDiskSize, _ := cmd.Flags().GetInt("os-disk-size")
+		storageType, _ := cmd.Flags().GetString("storage-type")
+
+		// Override defaults for control-plane pools if not explicitly set
+		if role == "control-plane" {
+			if !cmd.Flags().Changed("sku") {
+				sku = "Internal_D64s_v3_NoDwnclk"
+			}
+			if !cmd.Flags().Changed("instance-count") {
+				instanceCount = 1
+			}
+		}
 
 		// Accept one or more MSI resource IDs
 		msiIDs, _ := cmd.Flags().GetStringArray("msi")
@@ -73,6 +84,7 @@ var createPoolCmd = &cobra.Command{
 			K8sVersion:     k8sVersion,
 			SKU:            sku,
 			OSDiskSizeGB:   osDiskSize,
+			StorageType:    storageType,
 			MSIIDs:         msiIDs,
 		})
 	},
@@ -152,11 +164,12 @@ func init() {
 	createPoolCmd.Flags().String("name", "", "Name of the node pool (required)")
 	createPoolCmd.Flags().String("role", "control-plane", "Role of the node pool (control-plane or worker)")
 	createPoolCmd.Flags().String("region", "canadacentral", "Azure region for the pool")
-	createPoolCmd.Flags().Int("instance-count", 1, "Number of VMSS instances")
+	createPoolCmd.Flags().Int("instance-count", 1, "Number of VMSS instances (default: 1 for control-plane, 1 for worker)")
 	createPoolCmd.Flags().String("ssh-key", os.ExpandEnv("$HOME/.ssh/id_rsa.pub"), "Path to the SSH public key file")
 	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes (k3s) version (e.g. v1.33.1)")
-	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Standard_D2s_v3)")
+	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Internal_D64s_v3_NoDwnclk for control-plane, Standard_D2s_v3 for worker)")
 	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
+	createPoolCmd.Flags().String("storage-type", "Premium_LRS", "Storage type for OS disk (Premium_LRS, UltraSSD_LRS, PremiumV2_LRS, StandardSSD_LRS, Standard_LRS)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
 
 	_ = createPoolCmd.MarkFlagRequired("name")

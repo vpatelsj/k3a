@@ -29,6 +29,7 @@ type CreatePoolArgs struct {
 	K8sVersion     string   // New field for Kubernetes version
 	SKU            string   // VM SKU type
 	OSDiskSizeGB   int      // OS disk size in GB
+	StorageType    string   // Storage account type for OS disk (optional)
 	MSIIDs         []string // Additional user-assigned MSI resource IDs
 }
 
@@ -303,6 +304,25 @@ func Create(args CreatePoolArgs) error {
 		inboundNatPools = nil
 	}
 
+	// Determine storage account type - default to Premium SSD for higher IOPS
+	var storageAccountType armcompute.StorageAccountTypes
+	switch args.StorageType {
+	case "UltraSSD_LRS":
+		storageAccountType = armcompute.StorageAccountTypesUltraSSDLRS
+	case "Premium_LRS":
+		storageAccountType = armcompute.StorageAccountTypesPremiumLRS
+	case "StandardSSD_LRS":
+		storageAccountType = armcompute.StorageAccountTypesStandardSSDLRS
+	case "Standard_LRS":
+		storageAccountType = armcompute.StorageAccountTypesStandardLRS
+	case "PremiumV2_LRS":
+		storageAccountType = armcompute.StorageAccountTypesPremiumV2LRS
+	default:
+		// Default to Premium SSD for best IOPS performance
+		storageAccountType = armcompute.StorageAccountTypesPremiumLRS
+	}
+
+	// Configure storage profile with Premium SSD for higher IOPS performance
 	storageProfile := &armcompute.VirtualMachineScaleSetStorageProfile{
 		ImageReference: &armcompute.ImageReference{
 			Publisher: to.Ptr("MicrosoftCblMariner"),
@@ -312,8 +332,9 @@ func Create(args CreatePoolArgs) error {
 		},
 		OSDisk: &armcompute.VirtualMachineScaleSetOSDisk{
 			CreateOption: to.Ptr(armcompute.DiskCreateOptionTypesFromImage),
+			Caching:      to.Ptr(armcompute.CachingTypesReadWrite),
 			ManagedDisk: &armcompute.VirtualMachineScaleSetManagedDiskParameters{
-				StorageAccountType: to.Ptr(armcompute.StorageAccountTypesStandardLRS),
+				StorageAccountType: to.Ptr(storageAccountType),
 			},
 			DiskSizeGB: to.Ptr(int32(args.OSDiskSizeGB)),
 		},
