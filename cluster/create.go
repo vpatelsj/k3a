@@ -56,6 +56,7 @@ type CreateArgs struct {
 	Location             string
 	VnetAddressSpace     string
 	PostgresSKU          string
+	PostgresStorageGB    int
 	PostgresPublicAccess bool
 }
 
@@ -360,7 +361,7 @@ func Create(args CreateArgs) error {
 
 	clusterHash := kstrings.UniqueString(cluster)
 	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresPublicAccess, cred); err != nil {
+	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresStorageGB, args.PostgresPublicAccess, cred); err != nil {
 		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
 	}
 
@@ -499,7 +500,7 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 }
 
 // createPostgresFlexibleServer provisions an Azure PostgreSQL Flexible Server matching the Bicep module configuration
-func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash, postgresSKU string, publicAccess bool, cred *azidentity.DefaultAzureCredential) error {
+func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash, postgresSKU string, postgresStorageGB int, publicAccess bool, cred *azidentity.DefaultAzureCredential) error {
 	serverName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
 	serversClient, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
 	if err != nil {
@@ -508,7 +509,12 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 
 	// Use default SKU if none provided
 	if postgresSKU == "" {
-		postgresSKU = "Standard_D2s_v3"
+		postgresSKU = "Standard_D48s_v3"
+	}
+
+	// Use default storage size if none provided or invalid
+	if postgresStorageGB <= 0 {
+		postgresStorageGB = 1024 // Default to 1TB for P30 tier (5,000 IOPS)
 	}
 
 	// Build the delegated subnet resource ID
@@ -554,9 +560,11 @@ func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceG
 			AdministratorLogin:         to.Ptr(adminUsername),
 			AdministratorLoginPassword: to.Ptr(adminPassword),
 			Version:                    to.Ptr(armpostgresqlflexibleservers.ServerVersion("15")),
-			// 128GB storage automatically provides P10 performance tier with up to 2400 IOPS
+			// Configurable storage size for different performance tiers
+			// 128GB = P10 (2,400 IOPS), 512GB = P20 (2,300 IOPS), 1TB = P30 (5,000 IOPS), 2TB = P40 (7,500 IOPS)
+			// Default: 1TB = P30 tier with 5,000 IOPS for high performance
 			Storage: &armpostgresqlflexibleservers.Storage{
-				StorageSizeGB: to.Ptr[int32](128),
+				StorageSizeGB: to.Ptr[int32](int32(postgresStorageGB)),
 			},
 			HighAvailability: &armpostgresqlflexibleservers.HighAvailability{
 				Mode: to.Ptr(armpostgresqlflexibleservers.HighAvailabilityModeDisabled),

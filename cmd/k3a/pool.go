@@ -168,7 +168,7 @@ func init() {
 	createPoolCmd.Flags().String("ssh-key", os.ExpandEnv("$HOME/.ssh/id_rsa.pub"), "Path to the SSH public key file")
 	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes (k3s) version (e.g. v1.33.1)")
 	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Internal_D64s_v3_NoDwnclk for control-plane, Standard_D2s_v3 for worker)")
-	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
+	createPoolCmd.Flags().Int("os-disk-size", 1024, "OS disk size in GB (default: 1024GB for P30 tier = 5,000 IOPS)")
 	createPoolCmd.Flags().String("storage-type", "Premium_LRS", "Storage type for OS disk (Premium_LRS, UltraSSD_LRS, PremiumV2_LRS, StandardSSD_LRS, Standard_LRS)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
 
