@@ -55,6 +55,7 @@ var createPoolCmd = &cobra.Command{
 		sku, _ := cmd.Flags().GetString("sku")
 		osDiskSize, _ := cmd.Flags().GetInt("os-disk-size")
 		storageType, _ := cmd.Flags().GetString("storage-type")
+		etcdEndpoint, _ := cmd.Flags().GetString("etcd-endpoint")
 
 		// Override defaults for control-plane pools if not explicitly set
 		if role == "control-plane" {
@@ -86,6 +87,7 @@ var createPoolCmd = &cobra.Command{
 			OSDiskSizeGB:   osDiskSize,
 			StorageType:    storageType,
 			MSIIDs:         msiIDs,
+			EtcdEndpoint:   etcdEndpoint,
 		})
 	},
 }
@@ -171,9 +173,11 @@ func init() {
 	createPoolCmd.Flags().Int("os-disk-size", 1024, "OS disk size in GB (default: 1024GB for P30 tier = 5,000 IOPS)")
 	createPoolCmd.Flags().String("storage-type", "Premium_LRS", "Storage type for OS disk (Premium_LRS, UltraSSD_LRS, PremiumV2_LRS, StandardSSD_LRS, Standard_LRS)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
+	createPoolCmd.Flags().String("etcd-endpoint", "", "External etcd endpoint for cluster datastore (e.g. http://etcd-server:2379)")
 
 	_ = createPoolCmd.MarkFlagRequired("name")
 	_ = createPoolCmd.MarkFlagRequired("role")
+	_ = createPoolCmd.MarkFlagRequired("etcd-endpoint")
 
 	// Pool delete flags
 	deletePoolCmd.Flags().String("cluster", clusterDefault, "Cluster name (or set K3A_CLUSTER) (required)")

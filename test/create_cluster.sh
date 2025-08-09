@@ -1,8 +1,8 @@
 go build -o k3a ./cmd/k3a && echo "Build successful"
-# Create cluster with high-performance PostgreSQL (D48s_v3 + P30 tier = 5,000 IOPS)
+# Create cluster infrastructure (without PostgreSQL since we'll use external etcd)
 ./k3a cluster create --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --region canadacentral --cluster k3s-canadacentral-vapa17
-# Create control plane with Premium SSD 1TB (P30 tier = 5,000 IOPS) - now matches PostgreSQL performance!
-./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-master --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane
+# Create control plane with external etcd endpoint
+./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-master --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane --etcd-endpoint "http://4.206.93.140:2379"
 ./k3a nsg rule create --cluster  k3s-canadacentral-vapa17 --source CorpNetPublic --name AllowCorpNetPublic --priority 150  --subscription 110efc33-11a4-46b9-9986-60716283fbe7
 ./k3a kubeconfig --cluster  k3s-canadacentral-vapa17
 ./k3a acr create --cluster k3s-canadacentral-vapa22 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --name acrvapa22 --region canadacentral

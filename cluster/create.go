@@ -51,13 +51,10 @@ func assignRoleWithRetry(ctx context.Context, client *armauthorization.RoleAssig
 }
 
 type CreateArgs struct {
-	SubscriptionID       string
-	Cluster              string
-	Location             string
-	VnetAddressSpace     string
-	PostgresSKU          string
-	PostgresStorageGB    int
-	PostgresPublicAccess bool
+	SubscriptionID   string
+	Cluster          string
+	Location         string
+	VnetAddressSpace string
 }
 
 // createResourceGroup creates an Azure resource group
@@ -291,6 +288,8 @@ func Create(args CreateArgs) error {
 	if err != nil {
 		return err
 	}
+	// KeyVault is still needed for kubeconfig storage in cloud-init template
+	_ = keyVaultName // Used by pool creation for kubeconfig storage
 
 	// Create Network Security Group (NSG)
 	nsgName := vnetNamePrefix + "-nsg"
@@ -347,38 +346,40 @@ func Create(args CreateArgs) error {
 		return fmt.Errorf("failed to assign Table Data Contributor role to MSI: %w", err)
 	}
 
-	postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
-	if err != nil {
-		return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
-	}
-	if postgresPassword == "" {
-		// Generate a strong password for Postgres
-		postgresPassword, err = kstrings.GeneratePassword(24)
-		if err != nil {
-			return fmt.Errorf("failed to generate postgres password: %w", err)
-		}
-	}
+	// PostgreSQL is not needed when using external etcd
+	// postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
+	// if err != nil {
+	// 	return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
+	// }
+	// if postgresPassword == "" {
+	// 	// Generate a strong password for Postgres
+	// 	postgresPassword, err = kstrings.GeneratePassword(24)
+	// 	if err != nil {
+	// 		return fmt.Errorf("failed to generate postgres password: %w", err)
+	// 	}
+	// }
 
 	clusterHash := kstrings.UniqueString(cluster)
-	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresStorageGB, args.PostgresPublicAccess, cred); err != nil {
-		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
-	}
+	// pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
+	// if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresStorageGB, args.PostgresPublicAccess, cred); err != nil {
+	// 	return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
+	// }
 
 	if err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient); err != nil {
 		return fmt.Errorf("failed to create Load Balancer: %w", err)
 	}
 
-	// Reset the Postgres admin password to the generated password
-	if err := resetPostgresAdminPassword(ctx, subscriptionID, cluster, pgServerName, "azureuser", postgresPassword); err != nil {
-		return fmt.Errorf("failed to reset Postgres admin password: %w", err)
-	}
+	// PostgreSQL password reset is not needed when using external etcd
+	// // Reset the Postgres admin password to the generated password
+	// if err := resetPostgresAdminPassword(ctx, subscriptionID, cluster, pgServerName, "azureuser", postgresPassword); err != nil {
+	// 	return fmt.Errorf("failed to reset Postgres admin password: %w", err)
+	// }
 
-	// Store the password in Key Vault
-	secretName := "postgres-admin-password"
-	if err := storeSecretInKeyVault(ctx, subscriptionID, keyVaultName, secretName, postgresPassword); err != nil {
-		return fmt.Errorf("failed to store secret in Key Vault: %w", err)
-	}
+	// // Store the password in Key Vault
+	// secretName := "postgres-admin-password"
+	// if err := storeSecretInKeyVault(ctx, subscriptionID, keyVaultName, secretName, postgresPassword); err != nil {
+	// 	return fmt.Errorf("failed to store secret in Key Vault: %w", err)
+	// }
 
 	return nil
 }

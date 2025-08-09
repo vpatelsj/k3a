@@ -31,6 +31,7 @@ type CreatePoolArgs struct {
 	OSDiskSizeGB   int      // OS disk size in GB
 	StorageType    string   // Storage account type for OS disk (optional)
 	MSIIDs         []string // Additional user-assigned MSI resource IDs
+	EtcdEndpoint   string   // Etcd endpoint for external datastore
 }
 
 //go:embed cloud-init.yaml
@@ -257,19 +258,16 @@ func Create(args CreatePoolArgs) error {
 	}
 
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
-	posgresName := fmt.Sprintf("k3apg%s", clusterHash)
 	storageAccountName := fmt.Sprintf("k3astorage%s", clusterHash)
 	tmplData := map[string]string{
-		"PostgresURL":        "",
 		"KeyVaultName":       keyVaultName,
-		"PostgresName":       posgresName,
-		"PostgresSuffix":     "postgres.database.azure.com",
 		"Role":               role,
 		"StorageAccountName": storageAccountName,
 		"ResourceGroup":      cluster,
 		"ExternalIP":         externalIP,
 		"K8sVersion":         args.K8sVersion, // Pass version to template
 		"MSIClientID":        *msi.Properties.ClientID,
+		"EtcdEndpoint":       args.EtcdEndpoint,
 	}
 
 	customDataB64, err := getCloudInitData(tmplData)
