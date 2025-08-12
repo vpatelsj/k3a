@@ -1,6 +1,7 @@
 go build -o k3a ./cmd/k3a && echo "Build successful"
-# Create cluster infrastructure (without PostgreSQL since we'll use external etcd)
+# Create cluster infrastructure with integrated PostgreSQL Flexible Server
 ./k3a cluster create --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --region canadacentral --cluster k3s-canadacentral-vapa17
+
 # Create control plane with external etcd endpoint
 ./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-master --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane --etcd-endpoint "http://4.206.93.140:2379"
 ./k3a nsg rule create --cluster  k3s-canadacentral-vapa17 --source CorpNetPublic --name AllowCorpNetPublic --priority 150  --subscription 110efc33-11a4-46b9-9986-60716283fbe7
@@ -32,9 +33,10 @@ echo "Metrics-server configured to run only on worker nodes"
 
 # Apply svclb-traefik patch to ensure it doesn't run on hollow nodes (if it exists)
 echo "Checking for svclb-traefik daemonset..."
-if kubectl get daemonset svclb-traefik -n kube-system >/dev/null 2>&1; then
+SVCLB_TRAEFIK_DS=$(kubectl get daemonsets -n kube-system -o name | grep svclb-traefik | head -n 1)
+if [ -n "$SVCLB_TRAEFIK_DS" ]; then
     echo "Applying svclb-traefik patch to avoid hollow nodes..."
-    kubectl patch daemonset svclb-traefik -n kube-system --patch-file scripts/svclb-traefik-patch.json
+    kubectl patch $SVCLB_TRAEFIK_DS -n kube-system --patch-file scripts/svclb-traefik-patch.json
     echo "Traefik load balancer configured to avoid hollow nodes"
 else
     echo "svclb-traefik daemonset not found (will be created when Traefik service needs load balancing)"

@@ -51,10 +51,14 @@ func assignRoleWithRetry(ctx context.Context, client *armauthorization.RoleAssig
 }
 
 type CreateArgs struct {
-	SubscriptionID   string
-	Cluster          string
-	Location         string
-	VnetAddressSpace string
+	SubscriptionID      string
+	Cluster             string
+	Location            string
+	VnetAddressSpace    string
+	CreatePostgres      bool
+	PostgresSKU         string
+	PostgresStorageGB   int
+	PostgresPublicAccess bool
 }
 
 // createResourceGroup creates an Azure resource group
@@ -347,39 +351,48 @@ func Create(args CreateArgs) error {
 	}
 
 	// PostgreSQL is not needed when using external etcd
-	// postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
-	// if err != nil {
-	// 	return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
-	// }
-	// if postgresPassword == "" {
-	// 	// Generate a strong password for Postgres
-	// 	postgresPassword, err = kstrings.GeneratePassword(24)
-	// 	if err != nil {
-	// 		return fmt.Errorf("failed to generate postgres password: %w", err)
-	// 	}
-	// }
-
 	clusterHash := kstrings.UniqueString(cluster)
-	// pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	// if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresStorageGB, args.PostgresPublicAccess, cred); err != nil {
-	// 	return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
-	// }
+	postgresPassword := ""
+	var pgServerName string
+	
+	// Only create PostgreSQL if requested
+	if args.CreatePostgres {
+		var err error
+		postgresPassword, err = getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
+		if err != nil {
+			return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
+		}
+		if postgresPassword == "" {
+			// Generate a strong password for Postgres
+			postgresPassword, err = kstrings.GeneratePassword(24)
+			if err != nil {
+				return fmt.Errorf("failed to generate postgres password: %w", err)
+			}
+		}
+
+		pgServerName = strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
+		if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, args.PostgresSKU, args.PostgresStorageGB, args.PostgresPublicAccess, cred); err != nil {
+			return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
+		}
+	}
 
 	if err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient); err != nil {
 		return fmt.Errorf("failed to create Load Balancer: %w", err)
 	}
 
-	// PostgreSQL password reset is not needed when using external etcd
-	// // Reset the Postgres admin password to the generated password
-	// if err := resetPostgresAdminPassword(ctx, subscriptionID, cluster, pgServerName, "azureuser", postgresPassword); err != nil {
-	// 	return fmt.Errorf("failed to reset Postgres admin password: %w", err)
-	// }
+	// PostgreSQL password reset and secret storage only if PostgreSQL was created
+	if args.CreatePostgres {
+		// Reset the Postgres admin password to the generated password
+		if err := resetPostgresAdminPassword(ctx, subscriptionID, cluster, pgServerName, "azureuser", postgresPassword); err != nil {
+			return fmt.Errorf("failed to reset Postgres admin password: %w", err)
+		}
 
-	// // Store the password in Key Vault
-	// secretName := "postgres-admin-password"
-	// if err := storeSecretInKeyVault(ctx, subscriptionID, keyVaultName, secretName, postgresPassword); err != nil {
-	// 	return fmt.Errorf("failed to store secret in Key Vault: %w", err)
-	// }
+		// Store the password in Key Vault
+		secretName := "postgres-admin-password"
+		if err := storeSecretInKeyVault(ctx, subscriptionID, keyVaultName, secretName, postgresPassword); err != nil {
+			return fmt.Errorf("failed to store secret in Key Vault: %w", err)
+		}
+	}
 
 	return nil
 }
