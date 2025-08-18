@@ -52,12 +52,12 @@ func CreateFlexibleServer(args CreatePostgreSQLArgs) error {
 		"--storage-size", args.StorageSize,
 		"--subscription", args.SubscriptionID,
 	)
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to create PostgreSQL server: %s", string(output))
 	}
-	
+
 	// Store the admin password in Azure Key Vault
 	if err := storePasswordInKeyVault(args.ServerName, args.AdminPassword); err != nil {
 		fmt.Printf("Warning: Failed to store password in key vault: %v\n", err)
@@ -65,13 +65,13 @@ func CreateFlexibleServer(args CreatePostgreSQLArgs) error {
 	} else {
 		fmt.Printf("PostgreSQL admin password stored in key vault as secret '%s-admin-password'\n", args.ServerName)
 	}
-	
+
 	return nil
 }
 
 func storePasswordInKeyVault(serverName, password string) error {
 	keyVaultURL := "https://k3akv2mye5a3uvry88.vault.azure.net/"
-	
+
 	cred, err := azidentity.NewDefaultAzureCredential(nil)
 	if err != nil {
 		return fmt.Errorf("failed to create credential: %w", err)
@@ -83,7 +83,7 @@ func storePasswordInKeyVault(serverName, password string) error {
 	}
 
 	secretName := fmt.Sprintf("%s-admin-password", serverName)
-	
+
 	_, err = client.SetSecret(context.Background(), secretName, azsecrets.SetSecretParameters{
 		Value: &password,
 	}, nil)
@@ -100,12 +100,12 @@ func ListFlexibleServers(args ListPostgreSQLArgs) error {
 		"--subscription", args.SubscriptionID,
 		"--output", "table",
 	)
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to list PostgreSQL servers: %s", string(output))
 	}
-	
+
 	fmt.Print(string(output))
 	return nil
 }
@@ -117,12 +117,12 @@ func DeleteFlexibleServer(args DeletePostgreSQLArgs) error {
 		"--subscription", args.SubscriptionID,
 		"--yes",
 	)
-	
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("failed to delete PostgreSQL server: %s", string(output))
 	}
-	
+
 	return nil
 }
 

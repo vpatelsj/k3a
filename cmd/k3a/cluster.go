@@ -36,13 +36,13 @@ var createClusterCmd = &cobra.Command{
 		defer done()
 
 		if err := cluster.Create(cluster.CreateArgs{
-			SubscriptionID:      subscriptionID,
-			Cluster:             clusterName,
-			Location:            region,
-			VnetAddressSpace:    vnetAddressSpace,
-			CreatePostgres:      createPostgres,
-			PostgresSKU:         postgresSKU,
-			PostgresStorageGB:   postgresStorageGB,
+			SubscriptionID:       subscriptionID,
+			Cluster:              clusterName,
+			Location:             region,
+			VnetAddressSpace:     vnetAddressSpace,
+			CreatePostgres:       createPostgres,
+			PostgresSKU:          postgresSKU,
+			PostgresStorageGB:    postgresStorageGB,
 			PostgresPublicAccess: postgresPublicAccess,
 		}); err != nil {
 			return fmt.Errorf("failed to create cluster: %w", err)

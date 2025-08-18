@@ -32,13 +32,16 @@ type CreatePoolArgs struct {
 	StorageType    string   // Storage account type for OS disk (optional)
 	MSIIDs         []string // Additional user-assigned MSI resource IDs
 	EtcdEndpoint   string   // Etcd endpoint for external datastore
+	UsePostgres    bool     // Use PostgreSQL instead of etcd
+	PostgresName   string   // PostgreSQL server name
+	PostgresSuffix string   // PostgreSQL server suffix (e.g., postgres.database.azure.com)
 }
 
 //go:embed cloud-init.yaml
 var cloudInitFS embed.FS
 
 // getCloudInitData renders the cloud-init template and returns base64-encoded data
-func getCloudInitData(tmplData map[string]string) (string, error) {
+func getCloudInitData(tmplData map[string]interface{}) (string, error) {
 	cloudInitBytes, err := cloudInitFS.ReadFile("cloud-init.yaml")
 	if err != nil {
 		return "", fmt.Errorf("failed to read embedded cloud-init.yaml: %w", err)
@@ -259,7 +262,7 @@ func Create(args CreatePoolArgs) error {
 
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
 	storageAccountName := fmt.Sprintf("k3astorage%s", clusterHash)
-	tmplData := map[string]string{
+	tmplData := map[string]interface{}{
 		"KeyVaultName":       keyVaultName,
 		"Role":               role,
 		"StorageAccountName": storageAccountName,
@@ -268,6 +271,9 @@ func Create(args CreatePoolArgs) error {
 		"K8sVersion":         args.K8sVersion, // Pass version to template
 		"MSIClientID":        *msi.Properties.ClientID,
 		"EtcdEndpoint":       args.EtcdEndpoint,
+		"UsePostgres":        args.UsePostgres, // Pass as boolean, not string
+		"PostgresName":       args.PostgresName,
+		"PostgresSuffix":     args.PostgresSuffix,
 	}
 
 	customDataB64, err := getCloudInitData(tmplData)

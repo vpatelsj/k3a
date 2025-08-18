@@ -51,13 +51,13 @@ func assignRoleWithRetry(ctx context.Context, client *armauthorization.RoleAssig
 }
 
 type CreateArgs struct {
-	SubscriptionID      string
-	Cluster             string
-	Location            string
-	VnetAddressSpace    string
-	CreatePostgres      bool
-	PostgresSKU         string
-	PostgresStorageGB   int
+	SubscriptionID       string
+	Cluster              string
+	Location             string
+	VnetAddressSpace     string
+	CreatePostgres       bool
+	PostgresSKU          string
+	PostgresStorageGB    int
 	PostgresPublicAccess bool
 }
 
@@ -354,7 +354,7 @@ func Create(args CreateArgs) error {
 	clusterHash := kstrings.UniqueString(cluster)
 	postgresPassword := ""
 	var pgServerName string
-	
+
 	// Only create PostgreSQL if requested
 	if args.CreatePostgres {
 		var err error

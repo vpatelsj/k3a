@@ -5,6 +5,7 @@ import (
 	"os"
 
 	"github.com/jwilder/k3a/pkg/spinner"
+	kstrings "github.com/jwilder/k3a/pkg/strings"
 	"github.com/jwilder/k3a/pool"
 	"github.com/spf13/cobra"
 )
@@ -56,6 +57,23 @@ var createPoolCmd = &cobra.Command{
 		osDiskSize, _ := cmd.Flags().GetInt("os-disk-size")
 		storageType, _ := cmd.Flags().GetString("storage-type")
 		etcdEndpoint, _ := cmd.Flags().GetString("etcd-endpoint")
+		usePostgres, _ := cmd.Flags().GetBool("use-postgres")
+		postgresName, _ := cmd.Flags().GetString("postgres-name")
+		postgresSuffix, _ := cmd.Flags().GetString("postgres-suffix")
+
+		// Validate datastore configuration
+		if usePostgres {
+			if postgresName == "" {
+				// Auto-generate PostgreSQL name based on cluster using the same logic as cluster creation
+				clusterHash := kstrings.UniqueString(cluster)
+				postgresName = fmt.Sprintf("k3apg%s", clusterHash)
+				fmt.Printf("Auto-detecting PostgreSQL server name: %s\n", postgresName)
+			}
+		} else {
+			if etcdEndpoint == "" {
+				return fmt.Errorf("--etcd-endpoint is required when --use-postgres is false")
+			}
+		}
 
 		// Override defaults for control-plane pools if not explicitly set
 		if role == "control-plane" {
@@ -88,6 +106,9 @@ var createPoolCmd = &cobra.Command{
 			StorageType:    storageType,
 			MSIIDs:         msiIDs,
 			EtcdEndpoint:   etcdEndpoint,
+			UsePostgres:    usePostgres,
+			PostgresName:   postgresName,
+			PostgresSuffix: postgresSuffix,
 		})
 	},
 }
@@ -174,10 +195,13 @@ func init() {
 	createPoolCmd.Flags().String("storage-type", "Premium_LRS", "Storage type for OS disk (Premium_LRS, UltraSSD_LRS, PremiumV2_LRS, StandardSSD_LRS, Standard_LRS)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
 	createPoolCmd.Flags().String("etcd-endpoint", "", "External etcd endpoint for cluster datastore (e.g. http://etcd-server:2379)")
+	createPoolCmd.Flags().Bool("use-postgres", false, "Use PostgreSQL instead of etcd as the datastore")
+	createPoolCmd.Flags().String("postgres-name", "", "PostgreSQL server name (required if use-postgres is true)")
+	createPoolCmd.Flags().String("postgres-suffix", "postgres.database.azure.com", "PostgreSQL server suffix (default: postgres.database.azure.com)")
 
 	_ = createPoolCmd.MarkFlagRequired("name")
 	_ = createPoolCmd.MarkFlagRequired("role")
-	_ = createPoolCmd.MarkFlagRequired("etcd-endpoint")
+	// Note: etcd-endpoint or postgres-name will be validated in the command logic
 
 	// Pool delete flags
 	deletePoolCmd.Flags().String("cluster", clusterDefault, "Cluster name (or set K3A_CLUSTER) (required)")

@@ -1,9 +1,9 @@
 go build -o k3a ./cmd/k3a && echo "Build successful"
 # Create cluster infrastructure with integrated PostgreSQL Flexible Server
-./k3a cluster create --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --region canadacentral --cluster k3s-canadacentral-vapa17
+./k3a cluster create --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --region canadacentral --cluster k3s-canadacentral-vapa17 --create-postgres
 
-# Create control plane with external etcd endpoint
-./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-master --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane --etcd-endpoint "http://4.206.93.140:2379"
+# Create control plane using PostgreSQL as datastore (auto-detects PostgreSQL server name)
+./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-master --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane --use-postgres
 ./k3a nsg rule create --cluster  k3s-canadacentral-vapa17 --source CorpNetPublic --name AllowCorpNetPublic --priority 150  --subscription 110efc33-11a4-46b9-9986-60716283fbe7
 ./k3a kubeconfig --cluster  k3s-canadacentral-vapa17
 ./k3a acr create --cluster k3s-canadacentral-vapa22 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --name acrvapa22 --region canadacentral
