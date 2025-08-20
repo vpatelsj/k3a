@@ -14,7 +14,7 @@ kubectl get nodes -o name | grep "k3s-agent-" | xargs -I {} kubectl label {} nod
 # Wait for worker nodes to be ready and label them
 echo "Waiting for worker nodes to be ready..."
 sleep 30
-kubectl get nodes --no-headers | grep -v "control-plane" | awk '{print $1}' | xargs -I {} kubectl label node {} node-role.kubernetes.io/worker=worker --overwrite
+kubectl get nodes --no-headers | awk '{print $1}' | grep 'agent' | xargs -r -I {} kubectl label node {} node-role.kubernetes.io/worker=worker --overwrite
 echo "All worker nodes labeled successfully"
 
 # Apply CoreDNS patch to ensure it only runs on agent/worker nodes

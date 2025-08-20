@@ -112,9 +112,9 @@ runcmd:
   - |
     {{- if eq .Role "control-plane" }}
     {{- if .UsePostgres }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=1000 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres"
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=1000 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres" --etcd-disable-snapshots
     {{- else }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=1000 --datastore-endpoint="{{ .EtcdEndpoint }}"
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=1000 --datastore-endpoint="{{ .EtcdEndpoint }}" --etcd-disable-snapshots
     {{- end }}
 
     systemctl daemon-reload
