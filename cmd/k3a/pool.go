@@ -61,17 +61,32 @@ var createPoolCmd = &cobra.Command{
 		postgresName, _ := cmd.Flags().GetString("postgres-name")
 		postgresSuffix, _ := cmd.Flags().GetString("postgres-suffix")
 
-		// Validate datastore configuration
+		// If an etcd endpoint is provided and the user did not explicitly set --use-postgres,
+		// automatically switch to etcd (disable Postgres). If they explicitly set --use-postgres=true,
+		// treat that as a conflict and error out.
+		if etcdEndpoint != "" {
+			if cmd.Flags().Changed("use-postgres") {
+				if usePostgres {
+					return fmt.Errorf("--etcd-endpoint provided but --use-postgres=true; either remove --etcd-endpoint or set --use-postgres=false")
+				}
+			} else {
+				usePostgres = false
+			}
+		}
+
+		// Debug output to verify flag processing
+		fmt.Printf("DEBUG CLI: UsePostgres=%t, EtcdEndpoint=%s\n", usePostgres, etcdEndpoint)
+
+		// Validate datastore configuration (Postgres vs etcd)
 		if usePostgres {
 			if postgresName == "" {
-				// Auto-generate PostgreSQL name based on cluster using the same logic as cluster creation
 				clusterHash := kstrings.UniqueString(cluster)
 				postgresName = fmt.Sprintf("k3apg%s", clusterHash)
-				fmt.Printf("Auto-detecting PostgreSQL server name: %s\n", postgresName)
+				// Suppressed auto-detect message for cleaner output
 			}
-		} else {
+		} else { // using etcd
 			if etcdEndpoint == "" {
-				return fmt.Errorf("--etcd-endpoint is required when --use-postgres is false")
+				return fmt.Errorf("--etcd-endpoint is required when PostgreSQL is disabled")
 			}
 		}
 
@@ -195,7 +210,7 @@ func init() {
 	createPoolCmd.Flags().String("storage-type", "Premium_LRS", "Storage type for OS disk (Premium_LRS, UltraSSD_LRS, PremiumV2_LRS, StandardSSD_LRS, Standard_LRS)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
 	createPoolCmd.Flags().String("etcd-endpoint", "", "External etcd endpoint for cluster datastore (e.g. http://etcd-server:2379)")
-	createPoolCmd.Flags().Bool("use-postgres", false, "Use PostgreSQL instead of etcd as the datastore")
+	createPoolCmd.Flags().Bool("use-postgres", true, "Use PostgreSQL as the datastore (default). Set --use-postgres=false to use external etcd (then --etcd-endpoint required)")
 	createPoolCmd.Flags().String("postgres-name", "", "PostgreSQL server name (required if use-postgres is true)")
 	createPoolCmd.Flags().String("postgres-suffix", "postgres.database.azure.com", "PostgreSQL server suffix (default: postgres.database.azure.com)")
 

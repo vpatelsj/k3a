@@ -13,7 +13,7 @@ Managing Kubernetes clusters and networking in Azure can be complex. k3a address
 - **Opinionated:** Secure-by-default configurations and best practices are built in.
 - **Secure:** Automated NSG rules and sensible defaults to help protect workloads.
 - **Microservice-Ready:** Suitable for deploying microservices on Kubernetes, from single-node clusters to larger deployments.
-- **Batteries Included & Upgradeable:** Provides a production-ready baseline with integrated ACR support via automated imagePullSecret creation using MSI authentication, and you can add features such as HPA (Horizontal Pod Autoscaler) and others as your requirements evolve.
+- **Batteries Included & Upgradeable:** Provides a production-ready baseline you can extend with features such as HPA (Horizontal Pod Autoscaler) and others as your requirements evolve.
 
 **Intended Users:**
 - Developers who need to deploy secure, production-ready clusters quickly
@@ -71,7 +71,6 @@ k3a provides the following main command groups:
 - **`cluster`** - Create, list, and delete k3s clusters
 - **`pool`** - Manage node pools (create, list, scale, delete, update)
 - **`nsg`** - Manage network security groups and rules
-- **`acr`** - Manage Azure Container Registry instances and imagePullSecrets
 - **`loadbalancer`** - Manage load balancers and rules
 - **`kubeconfig`** - Get kubeconfig for cluster access
 
@@ -84,11 +83,19 @@ k3a cluster create --cluster my-cluster --region eastus
 **Advanced Options:**
 
 ```sh
+PostgreSQL Flexible Server is created by default for the cluster datastore.
+
 # Create cluster with custom PostgreSQL SKU for better performance
 k3a cluster create --cluster my-cluster --region eastus --postgres-sku Standard_D4s_v3
 
 # Create cluster with custom VNet address space and PostgreSQL SKU
 k3a cluster create --cluster my-cluster --region eastus --vnet-address-space 172.16.0.0/12 --postgres-sku Standard_D8s_v3
+
+To skip provisioning PostgreSQL (e.g. if using external etcd):
+
+```sh
+k3a cluster create --cluster my-cluster --region eastus --create-postgres=false
+```
 ```
 
 **Available PostgreSQL SKUs:**
@@ -151,8 +158,14 @@ k3a pool create --cluster my-cluster --name high-perf-workers --role worker --in
 # Create pool with custom OS disk size and K8s version
 k3a pool create --cluster my-cluster --name worker-pool --role worker --instance-count 3 --sku Standard_D8s_v3 --os-disk-size 100 --k8s-version v1.33.1
 
-# Create control plane pool with specific configuration
+# Create control plane pool with specific configuration (PostgreSQL datastore by default)
 k3a pool create --cluster my-cluster --name control-plane --role control-plane --instance-count 3 --sku Standard_D4s_v3 --os-disk-size 50
+
+To use an external etcd instead of PostgreSQL for a pool (applies to control-plane):
+
+```sh
+k3a pool create --cluster my-cluster --name control-plane --role control-plane --use-postgres=false --etcd-endpoint http://my-etcd:2379
+```
 ```
 
 **Available VM SKUs:**
@@ -169,6 +182,7 @@ k3a pool create --cluster my-cluster --name control-plane --role control-plane -
 - `--k8s-version` - Kubernetes version (default: v1.33.1)
 - `--role` - Pool role: control-plane or worker (default: control-plane)
 - `--msi` - Additional managed service identity IDs (optional)
+- `--use-postgres` - (default true) Use managed PostgreSQL as datastore. If you pass `--etcd-endpoint`, PostgreSQL is auto-disabled unless you explicitly set `--use-postgres=true` (which will error with the endpoint). Use `--use-postgres=false --etcd-endpoint <url>` for external etcd.
 
 ### List Node Pools
 
@@ -204,50 +218,7 @@ k3a loadbalancer rule list --cluster my-cluster
 k3a loadbalancer rule delete --cluster my-cluster --name web-rule
 ```
 
-### Create an Azure Container Registry (ACR)
-
-```sh
-k3a acr create --cluster my-cluster --name myregistryname --region eastus --sku Standard
-```
-
-This command creates an Azure Container Registry for storing container images.
-
-### Create ACR imagePullSecret
-
-```sh
-k3a acr create-secret --cluster my-cluster --name myregistryname --secret-name acr-secret
-```
-
-This command automatically creates a Kubernetes imagePullSecret that allows your cluster to pull images from the ACR. The secret uses Azure CLI authentication tokens and is ready to use immediately.
-
-Then reference the secret in your pod specs:
-
-```yaml
-spec:
-  containers:
-  - name: my-app
-    image: myregistryname.azurecr.io/my-app:latest
-  imagePullSecrets:
-  - name: acr-secret
-```
-
-### List ACR Instances
-
-```sh
-k3a acr list --cluster my-cluster
-```
-
-### Create ACR imagePullSecret
-
-```sh
-k3a acr create-secret --cluster my-cluster --name myregistryname --secret-name acr-secret
-```
-
-### Delete an ACR Instance
-
-```sh
-k3a acr delete --cluster my-cluster --name myregistryname
-```
+<!-- ACR related documentation removed -->
 
 ## Contributing
 

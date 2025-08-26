@@ -96,7 +96,7 @@ func init() {
 	createClusterCmd.Flags().String("cluster", "", "Cluster name (or set K3A_CLUSTER) (required)")
 	createClusterCmd.Flags().String("region", "", "Azure region for the cluster (e.g., canadacentral) (required)")
 	createClusterCmd.Flags().String("vnet-address-space", "10.0.0.0/8", "VNet address space (CIDR, e.g. 10.0.0.0/8)")
-	createClusterCmd.Flags().Bool("create-postgres", false, "Create PostgreSQL Flexible Server with the cluster")
+	createClusterCmd.Flags().Bool("create-postgres", true, "Create PostgreSQL Flexible Server with the cluster (default: true; set --create-postgres=false to skip)")
 	createClusterCmd.Flags().String("postgres-sku", "Standard_D48s_v3", "PostgreSQL Flexible Server SKU (e.g. Standard_D48s_v3)")
 	createClusterCmd.Flags().Int("postgres-storage-gb", 256, "PostgreSQL storage size in GB (128, 256, 512, 1024, 2048)")
 	createClusterCmd.Flags().Bool("postgres-public-access", false, "Enable public access to PostgreSQL server")

@@ -276,6 +276,9 @@ func Create(args CreatePoolArgs) error {
 		"PostgresSuffix":     args.PostgresSuffix,
 	}
 
+	// Debug output to verify template data
+	fmt.Printf("DEBUG: UsePostgres=%t, EtcdEndpoint=%s\n", args.UsePostgres, args.EtcdEndpoint)
+
 	customDataB64, err := getCloudInitData(tmplData)
 	if err != nil {
 		return err
