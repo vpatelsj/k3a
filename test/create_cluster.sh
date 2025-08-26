@@ -1,14 +1,20 @@
 go build -o k3a ./cmd/k3a && echo "Build successful"
 # Create cluster infrastructure with integrated PostgreSQL Flexible Server
-./k3a cluster create --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --region canadacentral --cluster k3s-canadacentral-vapa17
+./k3a pool create --cluster k3s-canadacentral-vapa-dp4 --name k3s-master-1 --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane --etcd-endpoint "http://4.206.93.140:2379"  --sku Standard_D96s_v5
+
+./k3a nsg rule create --source CorpNetPublic --name AllowCorpNetPublic --priority 150  --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --cluster k3s-canadacentral-vapa-dp4
+./k3a kubeconfig --cluster k3s-canadacentral-vapa-dp4
+kubectl get nodes -o name | grep "k3s-agent-" | xargs -I {} kubectl label {} node-role.kubernetes.io/worker=worker --overwrite
+
 
 # Create control plane using PostgreSQL as datastore (auto-detects PostgreSQL server name)
-./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-master --instance-count 1 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role control-plane
-./k3a nsg rule create --cluster  k3s-canadacentral-vapa17 --source CorpNetPublic --name AllowCorpNetPublic --priority 150  --subscription 110efc33-11a4-46b9-9986-60716283fbe7
-./k3a kubeconfig --cluster  k3s-canadacentral-vapa17
-kubectl get nodes -o name | grep "k3s-agent-" | xargs -I {} kubectl label {} node-role.kubernetes.io/worker=worker --overwrite
-# Create worker nodes with Premium SSD 1TB (P30 tier = 5,000 IOPS)
-./k3a pool create --cluster k3s-canadacentral-vapa17 --name k3s-agent --instance-count 3 --sku Standard_D16s_v3 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role worker
+./k3a pool create --cluster k3s-canadacentral-vapa-dp4 --instance-count 100 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role worker --etcd-endpoint "http://4.206.93.140:2379"  --sku Standard_D16s_v3 --name k3s-agent-10
+./k3a pool create --cluster k3s-canadacentral-vapa-dp4 --instance-count 100 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role worker --etcd-endpoint "http://4.206.93.140:2379"  --sku Standard_D16s_v3 --name k3s-agent-20
+./k3a pool create --cluster k3s-canadacentral-vapa-dp4 --instance-count 100 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role worker --etcd-endpoint "http://4.206.93.140:2379"  --sku Standard_D16s_v3 --name k3s-agent-30
+./k3a pool create --cluster k3s-canadacentral-vapa-dp4 --instance-count 100 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role worker --etcd-endpoint "http://4.206.93.140:2379"  --sku Standard_D16s_v3 --name k3s-agent-40
+./k3a pool create --cluster k3s-canadacentral-vapa-dp4 --instance-count 100 --subscription 110efc33-11a4-46b9-9986-60716283fbe7 --role worker --etcd-endpoint "http://4.206.93.140:2379"  --sku Standard_D16s_v3 --name k3s-agent-50
+
+
 
 # Wait for worker nodes to be ready and label them
 echo "Waiting for worker nodes to be ready..."
