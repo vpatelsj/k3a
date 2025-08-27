@@ -22,7 +22,7 @@ write_files:
         kubeconfig: "/var/lib/rancher/k3s/server/cred/scheduler.kubeconfig"
         qps: 600
         burst: 800
-      percentageOfNodesToScore: 5
+      percentageOfNodesToScore: 1
       profiles:
         - schedulerName: default-scheduler
 {{- if eq .Role "control-plane" }}
@@ -123,9 +123,9 @@ runcmd:
   - |
     {{- if eq .Role "control-plane" }}
     {{- if .UsePostgres }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=1000 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres" --etcd-disable-snapshots --disable=traefik,local-path,core-dns,metrics-server --enable-pprof --kube-apiserver-arg=etcd-compaction-interval=0 --kube-scheduler-arg=config=/etc/rancher/k3s/scheduler-config.yaml --pause-image=mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 --kube-apiserver-arg=max-requests-inflight=5000 --kube-apiserver-arg=max-mutating-requests-inflight=2000
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --kube-controller-manager-arg=node-cidr-mask-size=22 --kubelet-arg=max-pods=300 --datastore-endpoint="postgres://azureuser:${POSTGRES_PASSWORD_ESCAPED}@{{.PostgresName}}.{{.PostgresSuffix}}:5432/postgres" --etcd-disable-snapshots --disable=traefik,local-path,core-dns,metrics-server --enable-pprof --kube-apiserver-arg=etcd-compaction-interval=0 --kube-scheduler-arg=config=/etc/rancher/k3s/scheduler-config.yaml --pause-image=mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 --kube-apiserver-arg=max-requests-inflight=5000 --kube-apiserver-arg=max-mutating-requests-inflight=2000 --kube-controller-manager-arg=node-monitor-period=1m --kube-controller-manager-arg=controllers=*,-node-lifecyle-controller
     {{- else }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --datastore-endpoint="{{ .EtcdEndpoint }}"  --kubelet-arg=max-pods=1000 --etcd-disable-snapshots --disable=traefik,local-storage,coredns,metrics-server  --enable-pprof  --kube-scheduler-arg=config=/etc/rancher/k3s/scheduler-config.yaml  --pause-image=mcr.microsoft.com/oss/v2/kubernetes/pause:3.10  --kube-apiserver-arg=max-requests-inflight=5000  --kube-apiserver-arg=max-mutating-requests-inflight=2000 --kube-apiserver-arg=etcd-compaction-interval=0 --kube-controller-manager-arg=kube-api-qps=600 --kube-controller-manager-arg=kube-api-burst=800 --kube-controller-manager-arg=node-monitor-grace-period=10m --kube-controller-manager-arg=concurrent-job-syncs=100
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - server --token=SECRET --tls-san {{ .ExternalIP }} --embedded-registry --cluster-cidr=16.0.0.0/5 --service-cidr=172.20.0.0/16 --datastore-endpoint="{{ .EtcdEndpoint }}"  --kubelet-arg=max-pods=300 --etcd-disable-snapshots --disable=traefik,local-storage,coredns,metrics-server  --enable-pprof  --kube-scheduler-arg=config=/etc/rancher/k3s/scheduler-config.yaml  --pause-image=mcr.microsoft.com/oss/v2/kubernetes/pause:3.10  --kube-apiserver-arg=max-requests-inflight=5000  --kube-apiserver-arg=max-mutating-requests-inflight=2000 --kube-apiserver-arg=etcd-compaction-interval=0 --kube-controller-manager-arg=kube-api-qps=600 --kube-controller-manager-arg=kube-api-burst=800 --kube-controller-manager-arg=node-monitor-period=1m --kube-controller-manager-arg=node-monitor-grace-period=10m --kube-controller-manager-arg=concurrent-job-syncs=100 --kube-controller-manager-arg=controllers=*,-node-lifecyle-controller
     {{- end }}
 
     systemctl daemon-reload
@@ -146,7 +146,7 @@ runcmd:
     done
 
     {{- else }}
-    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443 --kubelet-arg=max-pods=1000
+    curl -sfL https://get.k3s.io | INSTALL_K3S_VERSION="{{ .K8sVersion }}+k3s1" sh -s - agent --token=SECRET --server https://kubernetes.cluster.internal:6443 --kubelet-arg=max-pods=300 --pause-image=mcr.microsoft.com/oss/v2/kubernetes/pause:3.10
     
     # Wait for k3s to be ready, then label this node as worker
     while ! kubectl --kubeconfig=/var/lib/rancher/k3s/agent/kubelet.kubeconfig get nodes $(hostname) >/dev/null 2>&1; do
