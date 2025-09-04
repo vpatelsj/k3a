@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/postgresql/armpostgresqlflexibleservers"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 
@@ -259,7 +258,7 @@ func Create(args CreateArgs) error {
 		return err
 	}
 
-	keyVaultName, err := createKeyVault(ctx, subscriptionID, cluster, location, vnetNamePrefix, msiPrincipalID, callingPrincipalID, cred, tenantID)
+	_, err = createKeyVault(ctx, subscriptionID, cluster, location, vnetNamePrefix, msiPrincipalID, callingPrincipalID, cred, tenantID)
 	if err != nil {
 		return err
 	}
@@ -319,37 +318,10 @@ func Create(args CreateArgs) error {
 		return fmt.Errorf("failed to assign Table Data Contributor role to MSI: %w", err)
 	}
 
-	postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
-	if err != nil {
-		return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
-	}
-	if postgresPassword == "" {
-		// Generate a strong password for Postgres
-		postgresPassword, err = kstrings.GeneratePassword(24)
-		if err != nil {
-			return fmt.Errorf("failed to generate postgres password: %w", err)
-		}
-	}
-
 	clusterHash := kstrings.UniqueString(cluster)
-	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, cred); err != nil {
-		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
-	}
-
+	
 	if err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient); err != nil {
 		return fmt.Errorf("failed to create Load Balancer: %w", err)
-	}
-
-	// Reset the Postgres admin password to the generated password
-	if err := resetPostgresAdminPassword(ctx, subscriptionID, cluster, pgServerName, "azureuser", postgresPassword); err != nil {
-		return fmt.Errorf("failed to reset Postgres admin password: %w", err)
-	}
-
-	// Store the password in Key Vault
-	secretName := "postgres-admin-password"
-	if err := storeSecretInKeyVault(ctx, subscriptionID, keyVaultName, secretName, postgresPassword); err != nil {
-		return fmt.Errorf("failed to store secret in Key Vault: %w", err)
 	}
 
 	return nil
@@ -370,29 +342,6 @@ func storeSecretInKeyVault(ctx context.Context, subscriptionID, keyVaultName, se
 	_, err = client.SetSecret(ctx, secretName, azsecrets.SetSecretParameters{Value: to.Ptr(secretValue)}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to set secret in Key Vault: %w", err)
-	}
-	return nil
-}
-
-// resetPostgresAdminPassword resets the admin password for the given Postgres server
-func resetPostgresAdminPassword(ctx context.Context, subscriptionID, resourceGroup, serverName, adminUsername, newPassword string) error {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return fmt.Errorf("failed to get Azure credential: %w", err)
-	}
-	client, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Postgres servers client: %w", err)
-	}
-
-	// Update the admin password
-	_, err = client.BeginUpdate(ctx, resourceGroup, serverName, armpostgresqlflexibleservers.ServerForUpdate{
-		Properties: &armpostgresqlflexibleservers.ServerPropertiesForUpdate{
-			AdministratorLoginPassword: to.Ptr(newPassword),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to update Postgres admin password: %w", err)
 	}
 	return nil
 }
@@ -447,109 +396,12 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 						NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
 					},
 				},
-				{
-					Name: to.Ptr("postgres"),
-					Properties: &armnetwork.SubnetPropertiesFormat{
-						AddressPrefix:        to.Ptr("10.2.0.0/24"),
-						NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
-						Delegations: []*armnetwork.Delegation{
-							{
-								Name: to.Ptr("postgres-delegation"),
-								Properties: &armnetwork.ServiceDelegationPropertiesFormat{
-									ServiceName: to.Ptr("Microsoft.DBforPostgreSQL/flexibleServers"),
-								},
-							},
-						},
-					},
-				},
 			},
 		},
 	}, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create VNet: %w", err)
 	}
-	return nil
-}
-
-// createPostgresFlexibleServer provisions an Azure PostgreSQL Flexible Server matching the Bicep module configuration
-func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash string, cred *azidentity.DefaultAzureCredential) error {
-	serverName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	serversClient, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create postgres servers client: %w", err)
-	}
-
-	// Build the delegated subnet resource ID
-	delegatedSubnetResourceID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s-vnet/subnets/postgres", subscriptionID, resourceGroup, vnetNamePrefix)
-
-	// Ensure the private DNS zone exists before creating the Postgres server
-	privateDnsZoneName := serverName + ".private.postgres.database.azure.com"
-	privateDnsZoneArmResourceId := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
-	privateDnsZonesClient, err := armprivatedns.NewPrivateZonesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zones client: %w", err)
-	}
-	_, err = privateDnsZonesClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, armprivatedns.PrivateZone{
-		Location: to.Ptr("global"),
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create or update private DNS zone: %w", err)
-	}
-
-	parameters := armpostgresqlflexibleservers.Server{
-		Location: to.Ptr(location),
-		Properties: &armpostgresqlflexibleservers.ServerProperties{
-			AdministratorLogin:         to.Ptr(adminUsername),
-			AdministratorLoginPassword: to.Ptr(adminPassword),
-			Version:                    to.Ptr(armpostgresqlflexibleservers.ServerVersion("15")),
-			Storage: &armpostgresqlflexibleservers.Storage{
-				StorageSizeGB: to.Ptr[int32](32),
-			},
-			HighAvailability: &armpostgresqlflexibleservers.HighAvailability{
-				Mode: to.Ptr(armpostgresqlflexibleservers.HighAvailabilityModeDisabled),
-			},
-			Backup: &armpostgresqlflexibleservers.Backup{
-				BackupRetentionDays: to.Ptr[int32](7),
-			},
-			Network: &armpostgresqlflexibleservers.Network{
-				DelegatedSubnetResourceID:   to.Ptr(delegatedSubnetResourceID),
-				PrivateDNSZoneArmResourceID: to.Ptr(privateDnsZoneArmResourceId),
-			},
-		},
-		SKU: &armpostgresqlflexibleservers.SKU{
-			Name: to.Ptr("Standard_D2s_v3"),
-			Tier: to.Ptr(armpostgresqlflexibleservers.SKUTierGeneralPurpose),
-		},
-	}
-
-	poller, err := serversClient.BeginCreate(ctx, resourceGroup, serverName, parameters, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin postgres server creation: %w", err)
-	}
-	_, err = poller.PollUntilDone(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create postgres server: %w", err)
-	}
-
-	// Link the Postgres private DNS zone to the VNet
-	vnetLinksClient, err := armprivatedns.NewVirtualNetworkLinksClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet links client: %w", err)
-	}
-	vnetName := vnetNamePrefix + "-vnet"
-	_, err = vnetLinksClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, "postgres-vnet-link", armprivatedns.VirtualNetworkLink{
-		Location: to.Ptr("global"),
-		Properties: &armprivatedns.VirtualNetworkLinkProperties{
-			VirtualNetwork: &armprivatedns.SubResource{
-				ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, resourceGroup, vnetName)),
-			},
-			RegistrationEnabled: to.Ptr(false),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Postgres private DNS zone vnet link: %w", err)
-	}
-
 	return nil
 }
 

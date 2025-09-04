@@ -256,13 +256,9 @@ func Create(args CreatePoolArgs) error {
 	}
 
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
-	posgresName := fmt.Sprintf("k3apg%s", clusterHash)
 	storageAccountName := fmt.Sprintf("k3astorage%s", clusterHash)
 	tmplData := map[string]string{
-		"PostgresURL":        "",
 		"KeyVaultName":       keyVaultName,
-		"PostgresName":       posgresName,
-		"PostgresSuffix":     "postgres.database.azure.com",
 		"Role":               role,
 		"StorageAccountName": storageAccountName,
 		"ResourceGroup":      cluster,
