@@ -14,8 +14,8 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/jwilder/k3a/loadbalancer/rule"
-	kstrings "github.com/jwilder/k3a/pkg/strings"
+	"github.com/vpatelsj/k3a/loadbalancer/rule"
+	kstrings "github.com/vpatelsj/k3a/pkg/strings"
 )
 
 type CreatePoolArgs struct {

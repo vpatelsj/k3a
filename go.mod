@@ -1,4 +1,4 @@
-module github.com/jwilder/k3a
+module github.com/vpatelsj/k3a
 
 go 1.24
 

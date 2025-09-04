@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jwilder/k3a/pkg/spinner"
-	kstrings "github.com/jwilder/k3a/pkg/strings"
-	"github.com/jwilder/k3a/pool"
+	"github.com/vpatelsj/k3a/pkg/spinner"
+	kstrings "github.com/vpatelsj/k3a/pkg/strings"
+	"github.com/vpatelsj/k3a/pool"
 	"github.com/spf13/cobra"
 )
 

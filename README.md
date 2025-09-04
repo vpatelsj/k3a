@@ -35,7 +35,7 @@ Managing Kubernetes clusters and networking in Azure can be complex. k3a address
 Clone the repository and build the CLI:
 
 ```sh
-git clone https://github.com/jwilder/k3a.git
+git clone https://github.com/vpatelsj/k3a.git
 cd k3a
 go build -o k3a ./cmd/k3a
 ```
@@ -43,7 +43,7 @@ go build -o k3a ./cmd/k3a
 Or install directly with Go:
 
 ```sh
-go install github.com/jwilder/k3a/cmd/k3a@latest
+go install github.com/vpatelsj/k3a/cmd/k3a@latest
 ```
 
 ### Configuration
