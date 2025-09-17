@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"text/template"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
@@ -180,6 +181,180 @@ func getPublicIP(ctx context.Context, subscriptionID, cluster, publicIPName stri
 	return "", fmt.Errorf("could not determine external IP for public IP resource '%s'", publicIPName)
 }
 
+// determineNodeType determines the kubeadm node type based on existing cluster state
+func determineNodeType(ctx context.Context, role string, subscriptionID, cluster, keyVaultName string, cred *azidentity.DefaultAzureCredential) (string, error) {
+	if role != "control-plane" {
+		return "worker", nil
+	}
+
+	// Check if there's already a control-plane pool
+	vmssClient, err := armcompute.NewVirtualMachineScaleSetsClient(subscriptionID, cred, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create VMSS client: %w", err)
+	}
+
+	hasExistingControlPlane := false
+	pager := vmssClient.NewListPager(cluster, nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return "", fmt.Errorf("failed to list VMSS: %w", err)
+		}
+		for _, existingVMSS := range page.Value {
+			if existingVMSS.Tags != nil {
+				if v, ok := existingVMSS.Tags["k3a"]; ok && v != nil && *v == "control-plane" {
+					hasExistingControlPlane = true
+					break
+				}
+			}
+		}
+		if hasExistingControlPlane {
+			break
+		}
+	}
+
+	if !hasExistingControlPlane {
+		return "first-master", nil
+	}
+
+	// Check if existing cluster is healthy
+	installer := NewKubeadmInstaller(subscriptionID, cluster, keyVaultName, nil, cred)
+	if installer.validateExistingCluster(ctx) {
+		return "master", nil
+	}
+
+	// Existing cluster is unhealthy, become first-master
+	fmt.Println("Existing control-plane cluster is unhealthy, promoting to first-master")
+	return "first-master", nil
+}
+
+// installKubeadmOnInstances installs kubeadm on all instances in a VMSS
+func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vmssName, role string, expectedCount int, cred *azidentity.DefaultAzureCredential) error {
+	fmt.Printf("Installing kubeadm on VMSS: %s (role: %s)\n", vmssName, role)
+
+	// Create VMSS manager to get instance information
+	vmssManager := NewVMSSManager(subscriptionID, cluster, cred)
+
+	// Wait for all instances to be running
+	instances, err := vmssManager.WaitForVMSSInstancesRunning(ctx, vmssName, expectedCount, 10*time.Minute)
+	if err != nil {
+		return err
+	}
+
+	clusterHash := kstrings.UniqueString(cluster)
+	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
+	lbName := fmt.Sprintf("k3alb%s", clusterHash)
+
+	// Get load balancer public IP for SSH access
+	lbPublicIP, err := vmssManager.GetLoadBalancerPublicIP(ctx, lbName)
+	if err != nil {
+		return fmt.Errorf("failed to get load balancer public IP: %w", err)
+	}
+
+	// Get NAT port mappings for SSH access
+	natPortMappings, err := vmssManager.GetVMSSNATPortMappings(ctx, vmssName, lbName)
+	if err != nil {
+		return fmt.Errorf("failed to get NAT port mappings: %w", err)
+	}
+
+	// Determine the actual node type for kubeadm based on cluster state
+	nodeType, err := determineNodeType(ctx, role, subscriptionID, cluster, keyVaultName, cred)
+	if err != nil {
+		return fmt.Errorf("failed to determine node type: %w", err)
+	}
+
+	fmt.Printf("Determined node type: %s\n", nodeType)
+
+	// For control-plane, we only install on the first instance initially
+	// Additional instances will be handled separately if needed
+	var instancesToProcess []VMInstance
+	if role == "control-plane" && nodeType == "first-master" {
+		// Only process the first instance for initial cluster bootstrap
+		instancesToProcess = instances[:1]
+	} else {
+		// Process all instances
+		instancesToProcess = instances
+	}
+
+	// Install kubeadm on each instance
+	for i, instance := range instancesToProcess {
+		natPort, exists := natPortMappings[instance.Name]
+		if !exists {
+			return fmt.Errorf("no NAT port mapping found for instance %s", instance.Name)
+		}
+
+		fmt.Printf("Installing kubeadm on instance %s (NAT port: %d)\n", instance.Name, natPort)
+
+		// Create SSH connection via load balancer NAT
+		sshClient, err := CreateSSHClientViaNAT(lbPublicIP, natPort, "azureuser", "")
+		if err != nil {
+			return fmt.Errorf("failed to create SSH connection to %s: %w", instance.Name, err)
+		}
+		defer sshClient.Close()
+
+		// Create kubeadm installer
+		installer := NewKubeadmInstaller(subscriptionID, cluster, keyVaultName, sshClient, cred)
+
+		// Install based on node type
+		switch nodeType {
+		case "first-master":
+			if err := installer.InstallAsFirstMaster(ctx); err != nil {
+				return fmt.Errorf("failed to install first master on %s: %w", instance.Name, err)
+			}
+			// After first master is installed, remaining instances should join as additional masters
+			if role == "control-plane" && i == 0 && len(instancesToProcess) > 1 {
+				nodeType = "master"
+			}
+		case "master":
+			if err := installer.InstallAsAdditionalMaster(ctx); err != nil {
+				return fmt.Errorf("failed to install additional master on %s: %w", instance.Name, err)
+			}
+		case "worker":
+			if err := installer.InstallAsWorker(ctx); err != nil {
+				return fmt.Errorf("failed to install worker on %s: %w", instance.Name, err)
+			}
+		default:
+			return fmt.Errorf("unknown node type: %s", nodeType)
+		}
+
+		fmt.Printf("Successfully installed kubeadm on instance %s\n", instance.Name)
+	}
+
+	// If we have more control-plane instances and we just created the first master,
+	// install the remaining instances as additional masters
+	if role == "control-plane" && nodeType == "first-master" && len(instances) > 1 {
+		fmt.Printf("Installing additional control-plane instances (%d remaining)\n", len(instances)-1)
+
+		for _, instance := range instances[1:] {
+			natPort, exists := natPortMappings[instance.Name]
+			if !exists {
+				return fmt.Errorf("no NAT port mapping found for instance %s", instance.Name)
+			}
+
+			fmt.Printf("Installing kubeadm as additional master on instance %s (NAT port: %d)\n", instance.Name, natPort)
+
+			// Create SSH connection via load balancer NAT
+			sshClient, err := CreateSSHClientViaNAT(lbPublicIP, natPort, "azureuser", "")
+			if err != nil {
+				return fmt.Errorf("failed to create SSH connection to %s: %w", instance.Name, err)
+			}
+			defer sshClient.Close()
+
+			// Create kubeadm installer
+			installer := NewKubeadmInstaller(subscriptionID, cluster, keyVaultName, sshClient, cred)
+
+			if err := installer.InstallAsAdditionalMaster(ctx); err != nil {
+				return fmt.Errorf("failed to install additional master on %s: %w", instance.Name, err)
+			}
+
+			fmt.Printf("Successfully installed kubeadm as additional master on instance %s\n", instance.Name)
+		}
+	}
+
+	fmt.Printf("Kubeadm installation completed successfully on all instances\n")
+	return nil
+}
+
 func Create(args CreatePoolArgs) error {
 	subscriptionID := args.SubscriptionID
 	cluster := args.Cluster
@@ -221,7 +396,7 @@ func Create(args CreatePoolArgs) error {
 			for _, existingVMSS := range page.Value {
 				if existingVMSS.Name != nil && *existingVMSS.Name != vmssName && existingVMSS.Tags != nil {
 					if v, ok := existingVMSS.Tags["k3a"]; ok && v != nil && *v == "control-plane" {
-						return fmt.Errorf("A VMSS with role 'control-plane' already exists: %s", *existingVMSS.Name)
+						return fmt.Errorf("a VMSS with role 'control-plane' already exists: %s", *existingVMSS.Name)
 					}
 				}
 			}
@@ -400,5 +575,11 @@ func Create(args CreatePoolArgs) error {
 	}
 
 	fmt.Printf("VMSS deployment succeeded: %v\n", *resp.ID)
+
+	// Install kubeadm on the newly created instances
+	if err := installKubeadmOnInstances(ctx, subscriptionID, cluster, args.Name+"-vmss", args.Role, args.InstanceCount, cred); err != nil {
+		return fmt.Errorf("kubeadm installation failed: %w", err)
+	}
+
 	return nil
 }

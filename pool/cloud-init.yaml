@@ -1,3 +1,56 @@
 #cloud-config
 
+# Basic VM setup for k3a cluster nodes
+# Kubeadm installation is handled via SSH after VM creation
+
 package_update: true
+
+packages:
+  - curl
+  - wget
+  - git
+  - unzip
+  - ca-certificates
+
+# Ensure Azure CLI is installed for Key Vault access
+runcmd:
+  # Install Azure CLI for CBL-Mariner (RPM-based)
+  - sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+  - |
+    cat <<EOF | sudo tee /etc/yum.repos.d/azure-cli.repo
+    [azure-cli]
+    name=Azure CLI
+    baseurl=https://packages.microsoft.com/yumrepos/azure-cli
+    enabled=1
+    gpgcheck=1
+    gpgkey=https://packages.microsoft.com/keys/microsoft.asc
+    EOF
+  - sudo tdnf install -y azure-cli
+  
+  # Ensure azureuser has proper SSH directory
+  - sudo -u azureuser mkdir -p /home/azureuser/.ssh
+  - sudo -u azureuser chmod 700 /home/azureuser/.ssh
+  
+  # Set hostname based on instance metadata (if available)
+  - |
+    INSTANCE_NAME=$(curl -s -H Metadata:true "http://169.254.169.254/metadata/instance/compute/name?api-version=2021-02-01&format=text" 2>/dev/null || echo "k3a-node")
+    hostnamectl set-hostname "$INSTANCE_NAME"
+  
+  # Basic system optimization
+  - echo 'vm.swappiness=10' >> /etc/sysctl.conf
+  - sysctl -p
+
+write_files:
+  # Create a marker file to indicate cloud-init completion
+  - path: /var/lib/cloud/k3a-ready
+    content: |
+      Cloud-init setup completed for k3a cluster node
+      Timestamp: $(date)
+    permissions: '0644'
+
+# Ensure services are enabled
+bootcmd:
+  - systemctl enable ssh
+
+# Final message
+final_message: "k3a node cloud-init setup completed. Ready for kubeadm installation via SSH."
