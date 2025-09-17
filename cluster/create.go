@@ -18,7 +18,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dns/armdns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
@@ -457,6 +456,9 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
 			PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
+			DNSSettings: &armnetwork.PublicIPAddressDNSSettings{
+				DomainNameLabel: to.Ptr(resourceGroup), // Use resource group name (cluster name) as DNS label
+			},
 		},
 	}, nil)
 	if err != nil {
@@ -552,77 +554,27 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		return "", fmt.Errorf("failed to create load balancer: %w", err)
 	}
 
-	// 4. Create Public DNS Zone
-	publicDnsZoneName := fmt.Sprintf("%s.cloudapp.azure.com", resourceGroup)
-	publicDnsZonesClient, err := armdns.NewZonesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create public DNS zones client: %w", err)
-	}
-	_, err = publicDnsZonesClient.CreateOrUpdate(ctx, resourceGroup, publicDnsZoneName, armdns.Zone{
-		Location: to.Ptr("global"),
-	}, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create public DNS zone: %w", err)
-	}
-
-	// 5. Create DNS record for load balancer
-	dnsRecordName := resourceGroup // Use resource group name (cluster name) as DNS record name
-	recordSetsClient, err := armdns.NewRecordSetsClient(subscriptionID, cred, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create public DNS record sets client: %w", err)
-	}
-
-	// Wait for public IP to be assigned and get its address
-	var publicIPAddress string
+	// 4. Wait for public IP to be assigned and get its FQDN
+	// The DNS label was already set when creating the public IP, so we just need to construct the FQDN
+	var publicIPFQDN string
 	for i := 0; i < 30; i++ { // Wait up to 5 minutes
 		updatedPublicIP, err := publicIPClient.Get(ctx, resourceGroup, publicIPName, nil)
 		if err != nil {
 			return "", fmt.Errorf("failed to get updated public IP: %w", err)
 		}
-		if updatedPublicIP.Properties != nil && updatedPublicIP.Properties.IPAddress != nil && *updatedPublicIP.Properties.IPAddress != "" {
-			publicIPAddress = *updatedPublicIP.Properties.IPAddress
+		if updatedPublicIP.Properties != nil && updatedPublicIP.Properties.DNSSettings != nil && updatedPublicIP.Properties.DNSSettings.Fqdn != nil {
+			publicIPFQDN = *updatedPublicIP.Properties.DNSSettings.Fqdn
 			break
 		}
 		time.Sleep(10 * time.Second)
 	}
-	if publicIPAddress == "" {
-		return "", fmt.Errorf("failed to get public IP address after waiting")
+	if publicIPFQDN == "" {
+		return "", fmt.Errorf("failed to get public IP FQDN after waiting")
 	}
 
-	// Create A record pointing to the load balancer's public IP
-	_, err = recordSetsClient.CreateOrUpdate(ctx, resourceGroup, publicDnsZoneName, dnsRecordName, armdns.RecordTypeA, armdns.RecordSet{
-		Properties: &armdns.RecordSetProperties{
-			TTL: to.Ptr[int64](300),
-			ARecords: []*armdns.ARecord{
-				{
-					IPv4Address: to.Ptr(publicIPAddress),
-				},
-			},
-		},
-	}, nil)
-	if err != nil {
-		return "", fmt.Errorf("failed to create DNS A record: %w", err)
-	}
+	fmt.Printf("Public IP FQDN: %s\n", publicIPFQDN)
 
-	fmt.Printf("Created DNS record: %s.%s -> %s\n", dnsRecordName, publicDnsZoneName, publicIPAddress)
-
-	// Assign 'DNS Zone Contributor' role to the MSI for the public DNS zone
-	publicDnsZoneID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/dnsZones/%s", subscriptionID, resourceGroup, publicDnsZoneName)
-	dnsRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/befefa01-2a29-4197-83a8-272ff33ce314", subscriptionID)
-	dnsRoleAssignmentName := kstrings.DeterministicGUID(publicDnsZoneID + msiID + "befefa01-2a29-4197-83a8-272ff33ce314")
-	err = retryRoleAssignment(ctx, roleAssignmentsClient, publicDnsZoneID, dnsRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
-		Properties: &armauthorization.RoleAssignmentProperties{
-			PrincipalID:      to.Ptr(msiPrincipalID),
-			RoleDefinitionID: to.Ptr(dnsRoleDefID),
-		},
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to assign DNS Zone Contributor role to MSI: %w", err)
-	}
-
-	// Return the fully qualified domain name
-	dnsName := fmt.Sprintf("%s.%s", dnsRecordName, publicDnsZoneName)
-	return dnsName, nil
+	return publicIPFQDN, nil
 }
 
 // getSecretFromKeyVault retrieves a secret value from Azure Key Vault
