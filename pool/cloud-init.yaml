@@ -73,10 +73,17 @@ runcmd:
   - sudo -u azureuser mkdir -p /home/azureuser/.ssh
   - sudo -u azureuser chmod 700 /home/azureuser/.ssh
   
-  # Set hostname based on instance metadata (if available)
+  # Set hostname based on instance metadata (normalize Azure VMSS naming)
   - |
     INSTANCE_NAME=$(curl -s -H Metadata:true "http://169.254.169.254/metadata/instance/compute/name?api-version=2021-02-01&format=text" 2>/dev/null || echo "k3a-node")
-    hostnamectl set-hostname "$INSTANCE_NAME"
+    # Convert Azure VMSS naming (control-plane-vmss_1) to consistent format (control-plane-000001) 
+    if [[ "$INSTANCE_NAME" =~ control-plane-vmss_([0-9]+) ]]; then
+      INSTANCE_ID="${BASH_REMATCH[1]}"
+      NORMALIZED_NAME=$(printf "control-plane-%06d" "$INSTANCE_ID")
+      hostnamectl set-hostname "$NORMALIZED_NAME"
+    else
+      hostnamectl set-hostname "$INSTANCE_NAME"
+    fi
   
   # Basic system optimization
   - echo 'vm.swappiness=10' >> /etc/sysctl.conf
