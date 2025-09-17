@@ -330,38 +330,27 @@ func (k *KubeadmInstaller) isNodeInCluster() bool {
 	return false
 }
 
-// installKubeadmPrerequisites installs all prerequisites for kubeadm
+// installKubeadmPrerequisites ensures cloud-init completed and configures dynamic firewall rules
 func (k *KubeadmInstaller) installKubeadmPrerequisites() error {
-	fmt.Println("Installing kubeadm prerequisites...")
+	fmt.Println("Verifying cloud-init completion and configuring firewall...")
 
-	commands := []string{
-		// Update system and clean package cache
-		"sudo tdnf clean all",
-		"sudo tdnf update -y",
-		"sudo tdnf install -y curl ca-certificates",
+	// Wait for cloud-init to complete (check for marker file)
+	checkCommand := "test -f /var/lib/cloud/k3a-ready"
+	for i := 0; i < 30; i++ { // Wait up to 5 minutes
+		_, err := k.executeCommand(checkCommand)
+		if err == nil {
+			fmt.Println("Cloud-init setup verified - all prerequisites installed")
+			break
+		}
+		if i == 29 {
+			return fmt.Errorf("cloud-init did not complete within timeout")
+		}
+		fmt.Printf("Waiting for cloud-init to complete... (%d/30)\n", i+1)
+		time.Sleep(10 * time.Second)
+	}
 
-		// Install container runtime components separately
-		"sudo tdnf install -y moby-runc",
-		"sudo tdnf install -y moby-containerd",
-
-		// Start and enable containerd
-		"sudo systemctl enable --now containerd",
-
-		// Configure containerd to use systemd cgroup driver
-		"sudo mkdir -p /etc/containerd",
-		"sudo containerd config default | sudo tee /etc/containerd/config.toml",
-		"sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml",
-		"sudo systemctl restart containerd",
-
-		// Configure kernel modules
-		"sudo tee /etc/modules-load.d/k8s.conf <<EOF\noverlay\nbr_netfilter\nEOF",
-		"sudo modprobe overlay",
-		"sudo modprobe br_netfilter",
-
-		// Configure sysctl parameters
-		"sudo tee /etc/sysctl.d/k8s.conf <<EOF\nnet.bridge.bridge-nf-call-iptables  = 1\nnet.bridge.bridge-nf-call-ip6tables = 1\nnet.ipv4.ip_forward                 = 1\nEOF",
-		"sudo sysctl --system",
-
+	// Configure dynamic iptables rules (these need to be applied each time)
+	firewallCommands := []string{
 		// Configure iptables to allow Kubernetes ports (CBL-Mariner compatible)
 		"sudo iptables -I INPUT -p tcp --dport 6443 -j ACCEPT",        // API server
 		"sudo iptables -I INPUT -p tcp --dport 2379:2380 -j ACCEPT",   // etcd server client API
@@ -374,23 +363,12 @@ func (k *KubeadmInstaller) installKubeadmPrerequisites() error {
 		"sudo iptables -I INPUT -p tcp --dport 179 -j ACCEPT",         // BGP (if using Calico)
 		"sudo iptables -I INPUT -i flannel.1 -j ACCEPT",               // Allow flannel interface
 		"sudo iptables -I INPUT -i cni0 -j ACCEPT",                    // Allow CNI interface
-		// Create iptables directory and save rules (CBL-Mariner method)
+		// Save iptables rules
 		"sudo mkdir -p /etc/iptables",
 		"sudo sh -c 'iptables-save > /etc/iptables/rules.v4'",
-
-		// Disable swap
-		"sudo swapoff -a",
-		"sudo sed -i '/ swap / s/^\\(.*\\)$/#\\1/g' /etc/fstab",
-
-		// Add Kubernetes repository
-		"sudo tee /etc/yum.repos.d/kubernetes.repo <<EOF\n[kubernetes]\nname=Kubernetes\nbaseurl=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/\nenabled=1\ngpgcheck=1\ngpgkey=https://pkgs.k8s.io/core:/stable:/v1.33/rpm/repodata/repomd.xml.key\nEOF",
-
-		// Install Kubernetes components
-		"sudo tdnf install -y kubelet kubeadm kubectl",
-		"sudo systemctl enable kubelet",
 	}
 
-	for _, command := range commands {
+	for _, command := range firewallCommands {
 		fmt.Printf("Executing: %s\n", command)
 		output, err := k.executeCommand(command)
 		if err != nil {
@@ -398,7 +376,7 @@ func (k *KubeadmInstaller) installKubeadmPrerequisites() error {
 		}
 	}
 
-	fmt.Println("Kubeadm prerequisites installed successfully")
+	fmt.Println("Cloud-init verification and firewall configuration completed successfully")
 	return nil
 }
 
@@ -577,9 +555,12 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	controlPlaneEndpoint := fmt.Sprintf("%s:6443", lbPublicIP)
 	fmt.Printf("Using control plane endpoint: %s\n", controlPlaneEndpoint)
 
-	// Initialize Kubernetes cluster with stable control plane endpoint
+	// Initialize Kubernetes cluster (use internal IP only for initialization)
+	// Note: We don't use --control-plane-endpoint during init because the load balancer
+	// backend pool and health probe aren't ready yet, which would cause init to fail.
+	// Instead, we initialize with internal IP and add the public IP to certificate SAN for external access.
 	fmt.Println("Initializing Kubernetes cluster...")
-	initCommand := fmt.Sprintf("sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=%s --control-plane-endpoint=%s --upload-certs", internalIP, controlPlaneEndpoint)
+	initCommand := fmt.Sprintf("sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=%s --apiserver-cert-extra-sans=%s --upload-certs", internalIP, lbPublicIP)
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes cluster: %w", err)
@@ -598,6 +579,20 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 			return fmt.Errorf("failed to configure kubectl: %w", err)
 		}
 	}
+
+	// Store kubeconfig in Key Vault with load balancer endpoint
+	fmt.Println("Storing kubeconfig in Key Vault...")
+	kubeconfigOutput, err := k.executeCommand("sudo cat /etc/kubernetes/admin.conf")
+	if err != nil {
+		return fmt.Errorf("failed to read kubeconfig: %w", err)
+	}
+	
+	// Replace the internal IP with load balancer public IP in kubeconfig
+	modifiedKubeconfig := strings.ReplaceAll(kubeconfigOutput, fmt.Sprintf("https://%s:6443", internalIP), fmt.Sprintf("https://%s", controlPlaneEndpoint))
+	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-kubeconfig", k.cluster), modifiedKubeconfig); err != nil {
+		return err
+	}
+	fmt.Println("Kubeconfig stored in Key Vault with load balancer endpoint")
 
 	// Install Flannel CNI plugin
 	fmt.Println("Installing Flannel CNI plugin...")
@@ -636,8 +631,8 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 		return err
 	}
 
-	// Store API server endpoint
-	apiEndpoint := fmt.Sprintf("%s:6443", internalIP)
+	// Store API server endpoint (use load balancer public IP for external access)
+	apiEndpoint := controlPlaneEndpoint // Already includes :6443
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-api-endpoint", k.cluster), apiEndpoint); err != nil {
 		return err
 	}

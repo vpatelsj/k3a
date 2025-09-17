@@ -11,7 +11,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var kubeconfigSecretName = "kubeconfig-admin"
+var kubeconfigSecretName = "k3s-canadacentral-vapa-kadm3-kubeconfig"
 var kubeconfigCluster string
 
 var kubeconfigCmd = &cobra.Command{
