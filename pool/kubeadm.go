@@ -605,6 +605,12 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	fmt.Println("Waiting for cluster to stabilize...")
 	time.Sleep(60 * time.Second)
 
+	// Patch kubeadm-config ConfigMap to add controlPlaneEndpoint for multi-master support
+	fmt.Println("Updating kubeadm configuration for multi-master support...")
+	if err := k.patchKubeadmConfigForMultiMaster(controlPlaneEndpoint); err != nil {
+		return fmt.Errorf("failed to update kubeadm config for multi-master: %w", err)
+	}
+
 	// Generate and store join tokens in Key Vault
 	fmt.Println("Generating and storing join tokens...")
 
