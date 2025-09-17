@@ -18,10 +18,10 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/authorization/armauthorization"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/dns/armdns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
@@ -349,9 +349,15 @@ func Create(args CreateArgs) error {
 
 	clusterHash := kstrings.UniqueString(cluster)
 
-	if err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient); err != nil {
+	lbDNSName, err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient)
+	if err != nil {
 		return fmt.Errorf("failed to create Load Balancer: %w", err)
 	}
+
+	// Output the cluster information
+	fmt.Printf("Cluster resources created successfully!\n")
+	fmt.Printf("Load Balancer DNS: %s\n", lbDNSName)
+	fmt.Printf("Kubernetes API endpoint will be available at: https://%s:6443\n", lbDNSName)
 
 	return nil
 }
@@ -435,15 +441,14 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 }
 
 // createLoadBalancer provisions a Standard Load Balancer, public IP, backend pool, NAT pool, outbound rule, and private DNS zone with VNet link
-func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, clusterHash string, cred *azidentity.DefaultAzureCredential, msiID string, msiPrincipalID string, roleAssignmentsClient *armauthorization.RoleAssignmentsClient) error {
+func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, clusterHash string, cred *azidentity.DefaultAzureCredential, msiID string, msiPrincipalID string, roleAssignmentsClient *armauthorization.RoleAssignmentsClient) (string, error) {
 	lbName := strings.ToLower(vnetNamePrefix + "lb" + clusterHash)
 	publicIPName := lbName + "-publicIP"
-	vnetName := vnetNamePrefix + "-vnet"
 
 	// 1. Create Public IP
 	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create public IP client: %w", err)
+		return "", fmt.Errorf("failed to create public IP client: %w", err)
 	}
 	_, err = publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, publicIPName, armnetwork.PublicIPAddress{
 		Location: to.Ptr(location),
@@ -455,20 +460,20 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create public IP: %w", err)
+		return "", fmt.Errorf("failed to create public IP: %w", err)
 	}
 
 	// 2. Get Public IP resource ID
 	publicIP, err := publicIPClient.Get(ctx, resourceGroup, publicIPName, nil)
 	if err != nil {
-		return fmt.Errorf("failed to get public IP: %w", err)
+		return "", fmt.Errorf("failed to get public IP: %w", err)
 	}
 	publicIPID := *publicIP.ID
 
 	// 3. Create or Update Load Balancer
 	lbClient, err := armnetwork.NewLoadBalancersClient(subscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create load balancer client: %w", err)
+		return "", fmt.Errorf("failed to create load balancer client: %w", err)
 	}
 	frontendIPConfigName := "LoadBalancerFrontend"
 	backendPoolName := "outbound-pool"
@@ -544,57 +549,80 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create load balancer: %w", err)
+		return "", fmt.Errorf("failed to create load balancer: %w", err)
 	}
 
-	// 4. Create Private DNS Zone (cluster.internal) and VNet link
-	privateDnsZoneName := "cluster.internal"
-	privateDnsZonesClient, err := armprivatedns.NewPrivateZonesClient(subscriptionID, cred, nil)
+	// 4. Create Public DNS Zone
+	publicDnsZoneName := fmt.Sprintf("%s.cloudapp.azure.com", resourceGroup)
+	publicDnsZonesClient, err := armdns.NewZonesClient(subscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create private DNS zones client: %w", err)
+		return "", fmt.Errorf("failed to create public DNS zones client: %w", err)
 	}
-	zonePoller, err := privateDnsZonesClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, armprivatedns.PrivateZone{
+	_, err = publicDnsZonesClient.CreateOrUpdate(ctx, resourceGroup, publicDnsZoneName, armdns.Zone{
 		Location: to.Ptr("global"),
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("failed to start private DNS zone creation: %w", err)
+		return "", fmt.Errorf("failed to create public DNS zone: %w", err)
 	}
-	_, err = zonePoller.PollUntilDone(ctx, nil)
+
+	// 5. Create DNS record for load balancer
+	dnsRecordName := resourceGroup // Use resource group name (cluster name) as DNS record name
+	recordSetsClient, err := armdns.NewRecordSetsClient(subscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create or update private DNS zone: %w", err)
+		return "", fmt.Errorf("failed to create public DNS record sets client: %w", err)
 	}
-	vnetLinksClient, err := armprivatedns.NewVirtualNetworkLinksClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet links client: %w", err)
+
+	// Wait for public IP to be assigned and get its address
+	var publicIPAddress string
+	for i := 0; i < 30; i++ { // Wait up to 5 minutes
+		updatedPublicIP, err := publicIPClient.Get(ctx, resourceGroup, publicIPName, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to get updated public IP: %w", err)
+		}
+		if updatedPublicIP.Properties != nil && updatedPublicIP.Properties.IPAddress != nil && *updatedPublicIP.Properties.IPAddress != "" {
+			publicIPAddress = *updatedPublicIP.Properties.IPAddress
+			break
+		}
+		time.Sleep(10 * time.Second)
 	}
-	_, err = vnetLinksClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, "kubernetes-internal-link", armprivatedns.VirtualNetworkLink{
-		Location: to.Ptr("global"),
-		Properties: &armprivatedns.VirtualNetworkLinkProperties{
-			VirtualNetwork: &armprivatedns.SubResource{
-				ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, resourceGroup, vnetName)),
+	if publicIPAddress == "" {
+		return "", fmt.Errorf("failed to get public IP address after waiting")
+	}
+
+	// Create A record pointing to the load balancer's public IP
+	_, err = recordSetsClient.CreateOrUpdate(ctx, resourceGroup, publicDnsZoneName, dnsRecordName, armdns.RecordTypeA, armdns.RecordSet{
+		Properties: &armdns.RecordSetProperties{
+			TTL: to.Ptr[int64](300),
+			ARecords: []*armdns.ARecord{
+				{
+					IPv4Address: to.Ptr(publicIPAddress),
+				},
 			},
-			RegistrationEnabled: to.Ptr(false),
 		},
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet link: %w", err)
+		return "", fmt.Errorf("failed to create DNS A record: %w", err)
 	}
 
-	// Assign 'Private DNS Zone Contributor' role to the MSI for the private DNS zone
-	privateDnsZoneID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
-	privateDnsRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/b12aa53e-6015-4669-85d0-8515ebb3ae7f", subscriptionID)
-	privateDnsRoleAssignmentName := kstrings.DeterministicGUID(privateDnsZoneID + msiID + "b12aa53e-6015-4669-85d0-8515ebb3ae7f")
-	err = retryRoleAssignment(ctx, roleAssignmentsClient, privateDnsZoneID, privateDnsRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+	fmt.Printf("Created DNS record: %s.%s -> %s\n", dnsRecordName, publicDnsZoneName, publicIPAddress)
+
+	// Assign 'DNS Zone Contributor' role to the MSI for the public DNS zone
+	publicDnsZoneID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/dnsZones/%s", subscriptionID, resourceGroup, publicDnsZoneName)
+	dnsRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/befefa01-2a29-4197-83a8-272ff33ce314", subscriptionID)
+	dnsRoleAssignmentName := kstrings.DeterministicGUID(publicDnsZoneID + msiID + "befefa01-2a29-4197-83a8-272ff33ce314")
+	err = retryRoleAssignment(ctx, roleAssignmentsClient, publicDnsZoneID, dnsRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
-			RoleDefinitionID: to.Ptr(privateDnsRoleDefID),
+			RoleDefinitionID: to.Ptr(dnsRoleDefID),
 		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to assign Private DNS Zone Contributor role to MSI: %w", err)
+		return "", fmt.Errorf("failed to assign DNS Zone Contributor role to MSI: %w", err)
 	}
 
-	return nil
+	// Return the fully qualified domain name
+	dnsName := fmt.Sprintf("%s.%s", dnsRecordName, publicDnsZoneName)
+	return dnsName, nil
 }
 
 // getSecretFromKeyVault retrieves a secret value from Azure Key Vault

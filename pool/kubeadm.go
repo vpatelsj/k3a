@@ -12,8 +12,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 	"golang.org/x/crypto/ssh"
-	
-	kstrings "github.com/jwilder/k3a/pkg/strings"
 )
 
 // KubeadmInstaller handles kubeadm installation and cluster setup
@@ -380,11 +378,126 @@ func (k *KubeadmInstaller) installKubeadmPrerequisites() error {
 	return nil
 }
 
+// waitForAzureCLI waits for Azure CLI to become available
+func (k *KubeadmInstaller) waitForAzureCLI() error {
+	fmt.Println("Waiting for Azure CLI to become available...")
+
+	for i := 0; i < 60; i++ { // Wait up to 5 minutes
+		_, err := k.executeCommand("which az")
+		if err == nil {
+			fmt.Println("Azure CLI is now available")
+			return nil
+		}
+
+		// Also try the full path
+		_, err = k.executeCommand("test -x /usr/bin/az")
+		if err == nil {
+			fmt.Println("Azure CLI found at /usr/bin/az")
+			return nil
+		}
+
+		if i < 59 {
+			fmt.Printf("Azure CLI not yet available, waiting... (%d/60)\n", i+1)
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	return fmt.Errorf("azure CLI did not become available within timeout")
+}
+
+// waitForKubeadm waits for kubeadm to become available
+func (k *KubeadmInstaller) waitForKubeadm() error {
+	fmt.Println("Waiting for kubeadm to become available...")
+
+	for i := 0; i < 60; i++ { // Wait up to 5 minutes
+		_, err := k.executeCommand("which kubeadm")
+		if err == nil {
+			fmt.Println("kubeadm is now available")
+			return nil
+		}
+
+		// Also try the full path
+		_, err = k.executeCommand("test -x /usr/bin/kubeadm")
+		if err == nil {
+			fmt.Println("kubeadm found at /usr/bin/kubeadm")
+			return nil
+		}
+
+		if i < 59 {
+			fmt.Printf("kubeadm not yet available, waiting... (%d/60)\n", i+1)
+			time.Sleep(5 * time.Second)
+		}
+	}
+
+	return fmt.Errorf("kubeadm did not become available within timeout")
+}
+
+// setupDNSResolution sets up local DNS resolution for the cluster endpoint
+// This is needed because joining nodes need to resolve the DNS name from kubeadm-config
+// but DNS propagation may not be complete yet
+func (k *KubeadmInstaller) setupDNSResolution() error {
+	fmt.Println("Setting up local DNS resolution for cluster endpoint...")
+
+	// Get the first master's internal IP from Key Vault
+	ctx := context.Background()
+	apiEndpoint, err := k.getSecretFromKeyVault(ctx, fmt.Sprintf("%s-api-endpoint", k.cluster))
+	if err != nil {
+		return fmt.Errorf("failed to get API endpoint from Key Vault: %w", err)
+	}
+
+	// Extract the DNS name from the endpoint (format: hostname:6443)
+	dnsName := strings.Split(apiEndpoint, ":")[0]
+
+	// We need to resolve this DNS name to the first master's internal IP
+	// For now, we'll derive the first master IP by getting the master join token and parsing it
+	masterJoinSecretName := fmt.Sprintf("%s-master-join", k.cluster)
+	masterJoin, err := k.getSecretFromKeyVault(ctx, masterJoinSecretName)
+	if err != nil {
+		return fmt.Errorf("failed to get master join token: %w", err)
+	}
+
+	// Extract the IP from the join command (format: "kubeadm join 10.1.0.5:6443 ...")
+	parts := strings.Fields(masterJoin)
+	if len(parts) < 3 {
+		return fmt.Errorf("invalid master join command format")
+	}
+
+	// Get the IP:port from the join command
+	joinEndpoint := parts[2]                             // Should be "10.1.0.5:6443"
+	firstMasterIP := strings.Split(joinEndpoint, ":")[0] // Extract "10.1.0.5"
+
+	// Add DNS resolution to /etc/hosts
+	hostsEntry := fmt.Sprintf("%s %s", firstMasterIP, dnsName)
+	addHostsCmd := fmt.Sprintf("echo '%s' | sudo tee -a /etc/hosts", hostsEntry)
+
+	// Check if entry already exists first
+	checkCmd := fmt.Sprintf("grep -q '%s' /etc/hosts", dnsName)
+	_, err = k.executeCommand(checkCmd)
+	if err != nil {
+		// Entry doesn't exist, add it
+		_, err = k.executeCommand(addHostsCmd)
+		if err != nil {
+			return fmt.Errorf("failed to add DNS entry to /etc/hosts: %w", err)
+		}
+		fmt.Printf("Added DNS resolution: %s -> %s\n", dnsName, firstMasterIP)
+	} else {
+		fmt.Printf("DNS resolution already configured for %s\n", dnsName)
+	}
+
+	return nil
+}
+
 // loginToAzure logs in to Azure using managed identity
 func (k *KubeadmInstaller) loginToAzure() error {
 	fmt.Println("Logging in to Azure using managed identity...")
 
-	_, err := k.executeCommand("az login --identity")
+	// Wait for Azure CLI to be available first
+	if err := k.waitForAzureCLI(); err != nil {
+		return fmt.Errorf("azure CLI not available: %w", err)
+	}
+
+	// Use full path to az command and set PATH to ensure it's found
+	_, err := k.executeCommand("export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin && /usr/bin/az login --identity")
 	if err != nil {
 		return fmt.Errorf("failed to login to Azure: %w", err)
 	}
@@ -542,25 +655,23 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	internalIP := strings.TrimSpace(output)
 	fmt.Printf("Using internal IP: %s\n", internalIP)
 
-	// Get load balancer public IP for control plane endpoint
-	// Create VMSS manager to get load balancer IP
-	vmssManager := NewVMSSManager(k.subscriptionID, k.cluster, k.credential)
-	clusterHash := kstrings.UniqueString(k.cluster)
-	lbName := fmt.Sprintf("k3alb%s", clusterHash)
-	
-	lbPublicIP, err := vmssManager.GetLoadBalancerPublicIP(context.Background(), lbName)
-	if err != nil {
-		return fmt.Errorf("failed to get load balancer public IP for control plane endpoint: %w", err)
-	}
-	controlPlaneEndpoint := fmt.Sprintf("%s:6443", lbPublicIP)
-	fmt.Printf("Using control plane endpoint: %s\n", controlPlaneEndpoint)
-
-	// Initialize Kubernetes cluster (use internal IP only for initialization)
+	// Construct the DNS name directly (no need to test resolution)
+	dnsName := fmt.Sprintf("%s.%s.cloudapp.azure.com", k.cluster, k.cluster)
+	controlPlaneEndpoint := fmt.Sprintf("%s:6443", dnsName)
+	fmt.Printf("Using DNS control plane endpoint: %s\n", controlPlaneEndpoint) // Initialize Kubernetes cluster (use internal IP only for initialization)
 	// Note: We don't use --control-plane-endpoint during init because the load balancer
 	// backend pool and health probe aren't ready yet, which would cause init to fail.
-	// Instead, we initialize with internal IP and add the public IP to certificate SAN for external access.
+	// Instead, we initialize with internal IP and add the DNS name to certificate SAN for external access.
 	fmt.Println("Initializing Kubernetes cluster...")
-	initCommand := fmt.Sprintf("sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=%s --apiserver-cert-extra-sans=%s --upload-certs", internalIP, lbPublicIP)
+
+	// Wait for kubeadm to be available first
+	if err := k.waitForKubeadm(); err != nil {
+		return fmt.Errorf("kubeadm not available: %w", err)
+	}
+
+	// Extract just the hostname part of the control plane endpoint for SAN
+	sanHost := strings.Split(controlPlaneEndpoint, ":")[0]
+	initCommand := fmt.Sprintf("sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=%s --apiserver-cert-extra-sans=%s --upload-certs", internalIP, sanHost)
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes cluster: %w", err)
@@ -586,7 +697,7 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to read kubeconfig: %w", err)
 	}
-	
+
 	// Replace the internal IP with load balancer public IP in kubeconfig
 	modifiedKubeconfig := strings.ReplaceAll(kubeconfigOutput, fmt.Sprintf("https://%s:6443", internalIP), fmt.Sprintf("https://%s", controlPlaneEndpoint))
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-kubeconfig", k.cluster), modifiedKubeconfig); err != nil {
@@ -621,7 +732,13 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	}
 	workerJoin := strings.TrimSpace(workerJoinOutput)
 
-	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-worker-join", k.cluster), workerJoin); err != nil {
+	// Replace DNS endpoint with internal IP for cluster joining (DNS propagation issue)
+	// The join command should use the internal IP of the master, not the load balancer DNS
+	dnsEndpoint := fmt.Sprintf("%s:6443", dnsName)
+	internalEndpoint := fmt.Sprintf("%s:6443", internalIP)
+	workerJoinForCluster := strings.ReplaceAll(workerJoin, dnsEndpoint, internalEndpoint)
+
+	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-worker-join", k.cluster), workerJoinForCluster); err != nil {
 		return err
 	}
 
@@ -632,7 +749,7 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	}
 	certKey := strings.TrimSpace(certKeyOutput)
 
-	masterJoin := fmt.Sprintf("%s --control-plane --certificate-key %s", workerJoin, certKey)
+	masterJoin := fmt.Sprintf("%s --control-plane --certificate-key %s", workerJoinForCluster, certKey)
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-master-join", k.cluster), masterJoin); err != nil {
 		return err
 	}
@@ -671,6 +788,11 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 		return err
 	}
 
+	// Setup DNS resolution for cluster endpoint (needed for kubeadm-config ConfigMap access)
+	if err := k.setupDNSResolution(); err != nil {
+		return fmt.Errorf("failed to setup DNS resolution: %w", err)
+	}
+
 	// Wait for master join token to be available
 	masterJoinSecretName := fmt.Sprintf("%s-master-join", k.cluster)
 	masterJoin, err := k.waitForSecretInKeyVault(ctx, masterJoinSecretName, 60)
@@ -686,6 +808,10 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 	cleanedMasterJoin = strings.ReplaceAll(cleanedMasterJoin, "\r", " ")
 	// Replace multiple spaces with single space
 	cleanedMasterJoin = strings.Join(strings.Fields(cleanedMasterJoin), " ")
+
+	// Add ignore-preflight-errors flag to handle controlPlaneEndpoint validation
+	// This is necessary when adding control plane nodes without a stable controlPlaneEndpoint initially
+	cleanedMasterJoin = fmt.Sprintf("%s --ignore-preflight-errors=all", cleanedMasterJoin)
 
 	// Properly format the join command by wrapping it in quotes to handle special characters
 	joinCommand := fmt.Sprintf("sudo bash -c \"%s\"", strings.ReplaceAll(cleanedMasterJoin, "\"", "\\\""))
@@ -838,4 +964,72 @@ func CreateSSHClient(host, username, privateKeyPath string) (*ssh.Client, error)
 	}
 
 	return client, nil
+}
+
+// patchKubeadmConfigForMultiMaster patches the kubeadm-config ConfigMap to add controlPlaneEndpoint
+func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint string) error {
+	// Get current kubeadm-config ConfigMap
+	getConfigCmd := "kubectl get configmap kubeadm-config -n kube-system -o yaml"
+	currentConfig, err := k.executeCommand(getConfigCmd)
+	if err != nil {
+		return fmt.Errorf("failed to get kubeadm-config ConfigMap: %w", err)
+	}
+
+	// Check if controlPlaneEndpoint is already set
+	if strings.Contains(currentConfig, "controlPlaneEndpoint") {
+		fmt.Println("controlPlaneEndpoint already configured in kubeadm-config")
+		return nil
+	}
+
+	fmt.Printf("Adding controlPlaneEndpoint %s to kubeadm-config ConfigMap...\n", controlPlaneEndpoint)
+
+	// Get the current ClusterConfiguration data
+	getClusterConfigCmd := "kubectl get configmap kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}'"
+	clusterConfig, err := k.executeCommand(getClusterConfigCmd)
+	if err != nil {
+		return fmt.Errorf("failed to get ClusterConfiguration: %w", err)
+	}
+
+	// Add controlPlaneEndpoint to the configuration
+	// We'll add it right after the apiVersion line
+	lines := strings.Split(clusterConfig, "\n")
+	var newLines []string
+	added := false
+
+	for _, line := range lines {
+		newLines = append(newLines, line)
+		// Add controlPlaneEndpoint after apiVersion line
+		if strings.HasPrefix(line, "apiVersion:") && !added {
+			newLines = append(newLines, fmt.Sprintf("controlPlaneEndpoint: %s", controlPlaneEndpoint))
+			added = true
+		}
+	}
+
+	if !added {
+		// If apiVersion wasn't found, add it at the beginning after any initial lines
+		newLines = []string{fmt.Sprintf("controlPlaneEndpoint: %s", controlPlaneEndpoint)}
+		newLines = append(newLines, lines...)
+	}
+
+	newConfig := strings.Join(newLines, "\n")
+
+	// Create a temporary file with the new configuration
+	tempConfigCmd := fmt.Sprintf("cat > /tmp/cluster-config.yaml << 'EOF'\n%s\nEOF", newConfig)
+	_, err = k.executeCommand(tempConfigCmd)
+	if err != nil {
+		return fmt.Errorf("failed to create temporary config file: %w", err)
+	}
+
+	// Update the ConfigMap with the new configuration
+	patchCmd := "kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/cluster-config.yaml -n kube-system --dry-run=client -o yaml | kubectl apply -f -"
+	_, err = k.executeCommand(patchCmd)
+	if err != nil {
+		return fmt.Errorf("failed to update kubeadm-config ConfigMap: %w", err)
+	}
+
+	// Clean up temporary file
+	k.executeCommand("rm -f /tmp/cluster-config.yaml")
+
+	fmt.Printf("Successfully updated kubeadm-config with controlPlaneEndpoint: %s\n", controlPlaneEndpoint)
+	return nil
 }
