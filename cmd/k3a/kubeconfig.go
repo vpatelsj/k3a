@@ -21,10 +21,10 @@ var kubeconfigCmd = &cobra.Command{
 		if kubeconfigCluster == "" {
 			return fmt.Errorf("--cluster flag is required")
 		}
-		
+
 		// Compute secret name from cluster name
 		kubeconfigSecretName := fmt.Sprintf("%s-kubeconfig", kubeconfigCluster)
-		
+
 		// Compute keyvault name from cluster name
 		clusterHash := kstrings.UniqueString(kubeconfigCluster)
 		kubeconfigKeyVault := fmt.Sprintf("k3akv%s", clusterHash)

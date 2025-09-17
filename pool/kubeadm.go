@@ -655,8 +655,16 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	internalIP := strings.TrimSpace(output)
 	fmt.Printf("Using internal IP: %s\n", internalIP)
 
-	// Construct the DNS name directly (no need to test resolution)
-	dnsName := fmt.Sprintf("%s.%s.cloudapp.azure.com", k.cluster, k.cluster)
+	// Construct the DNS name with correct Azure format
+	// Extract region from cluster name (format: k3s-{region}-{suffix})
+	clusterParts := strings.Split(k.cluster, "-")
+	var region string
+	if len(clusterParts) >= 3 && strings.HasPrefix(k.cluster, "k3s-") {
+		region = clusterParts[1] // Extract region from k3s-{region}-{suffix}
+	} else {
+		region = "canadacentral" // fallback
+	}
+	dnsName := fmt.Sprintf("%s.%s.cloudapp.azure.com", k.cluster, region)
 	controlPlaneEndpoint := fmt.Sprintf("%s:6443", dnsName)
 	fmt.Printf("Using DNS control plane endpoint: %s\n", controlPlaneEndpoint) // Initialize Kubernetes cluster (use internal IP only for initialization)
 	// Note: We don't use --control-plane-endpoint during init because the load balancer
