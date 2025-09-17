@@ -1,6 +1,6 @@
 # k3a ![MIT License](https://img.shields.io/badge/license-MIT-green.svg) ![Go Version](https://img.shields.io/badge/Go-1.24%2B-blue.svg) ![Azure](https://img.shields.io/badge/Azure-Ready-brightgreen.svg)
 
-k3a is a command-line tool for deploying and managing lightweight Kubernetes clusters on Azure using [k3s](https://k3s.io/). It aims to reduce operational overhead and complexity, providing a minimal and opinionated approach to cluster management.
+k3a is a command-line tool for deploying and managing lightweight Kubernetes clusters on Azure. It aims to reduce operational overhead and complexity, providing a minimal and opinionated approach to cluster management.
 
 ---
 

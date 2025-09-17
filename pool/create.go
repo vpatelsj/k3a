@@ -391,11 +391,11 @@ func Create(args CreatePoolArgs) error {
 			SubscriptionID: subscriptionID,
 			ResourceGroup:  cluster,
 			LBName:         lbName,
-			RuleName:       "k3s",
+			RuleName:       "kubernetes-api",
 			FrontendPort:   6443,
 			BackendPort:    6443,
 		}); err != nil {
-			return fmt.Errorf("failed to create k3s load balancing rule: %w", err)
+			return fmt.Errorf("failed to create kubernetes API load balancing rule: %w", err)
 		}
 	}
 
