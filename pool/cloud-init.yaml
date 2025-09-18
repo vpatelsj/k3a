@@ -89,6 +89,20 @@ runcmd:
   - echo 'vm.swappiness=10' >> /etc/sysctl.conf
   - sysctl -p
 
+  # Configure iptables rules for Kubernetes (required before joining cluster)
+  - sudo iptables -I INPUT -p tcp --dport 6443 -j ACCEPT
+  - sudo iptables -I INPUT -p tcp --dport 10250 -j ACCEPT
+  - sudo iptables -I INPUT -p tcp --dport 10259 -j ACCEPT
+  - sudo iptables -I INPUT -p tcp --dport 10257 -j ACCEPT
+  - sudo iptables -I INPUT -p tcp --dport 30000:32767 -j ACCEPT
+  - sudo iptables -I INPUT -p udp --dport 10244 -j ACCEPT
+  - sudo iptables -I INPUT -p udp --dport 8472 -j ACCEPT
+  - sudo iptables -I INPUT -p tcp --dport 179 -j ACCEPT
+  - sudo iptables -I INPUT -i flannel.1 -j ACCEPT
+  - sudo iptables -I INPUT -i cni0 -j ACCEPT
+  - sudo mkdir -p /etc/iptables
+  - sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
+
   # Auto-join worker nodes to cluster
   - |
     if [ "{{.Role}}" = "worker" ]; then
