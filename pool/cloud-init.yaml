@@ -89,6 +89,53 @@ runcmd:
   - echo 'vm.swappiness=10' >> /etc/sysctl.conf
   - sysctl -p
 
+  # Auto-join worker nodes to cluster
+  - |
+    if [ "{{.Role}}" = "worker" ]; then
+      echo "Starting worker node auto-join process..." >> /var/log/k3a-worker-join.log
+      
+      # Wait for Azure CLI to be available
+      timeout 300 bash -c 'until az --version >/dev/null 2>&1; do sleep 5; done' || {
+        echo "Azure CLI not available after timeout" >> /var/log/k3a-worker-join.log
+        exit 1
+      }
+      
+      # Login using managed identity
+      az login --identity >> /var/log/k3a-worker-join.log 2>&1
+      
+      # Wait for worker join token to be available in Key Vault
+      KEYVAULT_NAME="{{.KeyVaultName}}"
+      SECRET_NAME="{{.ResourceGroup}}-worker-join"
+      
+      echo "Waiting for worker join token from Key Vault: $KEYVAULT_NAME" >> /var/log/k3a-worker-join.log
+      for i in {1..60}; do
+        if JOIN_COMMAND=$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$SECRET_NAME" --query "value" --output tsv 2>/dev/null); then
+          echo "Retrieved worker join command" >> /var/log/k3a-worker-join.log
+          break
+        fi
+        echo "Attempt $i: Worker join token not yet available, waiting..." >> /var/log/k3a-worker-join.log
+        sleep 10
+      done
+      
+      if [ -z "$JOIN_COMMAND" ]; then
+        echo "Failed to retrieve worker join command after 10 minutes" >> /var/log/k3a-worker-join.log
+        exit 1
+      fi
+      
+      # Execute the join command
+      echo "Executing kubeadm join..." >> /var/log/k3a-worker-join.log
+      eval "sudo $JOIN_COMMAND" >> /var/log/k3a-worker-join.log 2>&1
+      
+      if [ $? -eq 0 ]; then
+        echo "Worker node successfully joined the cluster!" >> /var/log/k3a-worker-join.log
+        echo "worker-joined" > /var/lib/cloud/k3a-worker-status
+      else
+        echo "Failed to join worker node to cluster" >> /var/log/k3a-worker-join.log
+        echo "worker-join-failed" > /var/lib/cloud/k3a-worker-status
+        exit 1
+      fi
+    fi
+
 write_files:
   # Create a marker file to indicate cloud-init completion
   - path: /var/lib/cloud/k3a-ready

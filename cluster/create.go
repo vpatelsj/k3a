@@ -380,7 +380,7 @@ func storeSecretInKeyVault(ctx context.Context, subscriptionID, keyVaultName, se
 	return nil
 }
 
-// createNetworkSecurityGroup creates a Network Security Group with default rules
+// createNetworkSecurityGroup creates a Network Security Group with default rules including CorpNetPublic access
 func createNetworkSecurityGroup(ctx context.Context, subscriptionID, resourceGroup, location, nsgName string, cred *azidentity.DefaultAzureCredential) (string, error) {
 	nsgClient, err := armnetwork.NewSecurityGroupsClient(subscriptionID, cred, nil)
 	if err != nil {
@@ -407,6 +407,34 @@ func createNetworkSecurityGroup(ctx context.Context, subscriptionID, resourceGro
 	if finalResp.SecurityGroup.ID == nil {
 		return "", fmt.Errorf("NSG creation did not return a valid ID")
 	}
+
+	// Add CorpNetPublic rule automatically
+	fmt.Println("Adding CorpNetPublic NSG rule...")
+	securityRulesClient, err := armnetwork.NewSecurityRulesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create security rules client: %w", err)
+	}
+
+	corpNetRule := armnetwork.SecurityRule{
+		Name: to.Ptr("AllowCorpNetPublic"),
+		Properties: &armnetwork.SecurityRulePropertiesFormat{
+			Priority:                 to.Ptr[int32](150),
+			Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
+			Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
+			Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolAsterisk),
+			SourceAddressPrefix:      to.Ptr("CorpNetPublic"),
+			SourcePortRange:          to.Ptr("*"),
+			DestinationAddressPrefix: to.Ptr("*"),
+			DestinationPortRange:     to.Ptr("*"),
+		},
+	}
+
+	_, err = securityRulesClient.BeginCreateOrUpdate(ctx, resourceGroup, nsgName, "AllowCorpNetPublic", corpNetRule, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to add CorpNetPublic NSG rule: %w", err)
+	}
+
+	fmt.Println("CorpNetPublic NSG rule added successfully")
 	return *finalResp.SecurityGroup.ID, nil
 }
 
