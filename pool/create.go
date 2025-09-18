@@ -245,13 +245,18 @@ func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vms
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
 	lbName := fmt.Sprintf("k3alb%s", clusterHash)
 
-	// Get load balancer public IP for SSH access
+	// Worker nodes use cloud-init for automatic joining, no SSH installation needed
+	if role == "worker" {
+		return nil
+	}
+
+	// Get load balancer public IP for SSH access (control-plane only)
 	lbPublicIP, err := vmssManager.GetLoadBalancerPublicIP(ctx, lbName)
 	if err != nil {
 		return fmt.Errorf("failed to get load balancer public IP: %w", err)
 	}
 
-	// Get NAT port mappings for SSH access
+	// Get NAT port mappings for SSH access (control-plane only)
 	natPortMappings, err := vmssManager.GetVMSSNATPortMappings(ctx, vmssName, lbName)
 	if err != nil {
 		return fmt.Errorf("failed to get NAT port mappings: %w", err)

@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azcore/to"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
@@ -203,22 +202,12 @@ func (vm *VMSSManager) GetVMSSNATPortMappings(ctx context.Context, vmssName, lbN
 		return nil, fmt.Errorf("failed to create load balancer client: %w", err)
 	}
 
-	// Try to get load balancer, first with expand parameter, then without if that fails
+	// Get load balancer (inbound NAT rules are included in response by default)
 	var lb armnetwork.LoadBalancersClientGetResponse
 
-	// First try with expand to get inbound NAT rules
-	expandOptions := &armnetwork.LoadBalancersClientGetOptions{
-		Expand: to.Ptr("inboundNatRules"),
-	}
-
-	lb, err = lbClient.Get(ctx, vm.cluster, lbName, expandOptions)
+	lb, err = lbClient.Get(ctx, vm.cluster, lbName, nil)
 	if err != nil {
-		// If expand fails, try without it
-		fmt.Printf("Warning: failed to get load balancer with expanded NAT rules, trying without expand: %v\n", err)
-		lb, err = lbClient.Get(ctx, vm.cluster, lbName, nil)
-		if err != nil {
-			return nil, fmt.Errorf("failed to get load balancer: %w", err)
-		}
+		return nil, fmt.Errorf("failed to get load balancer: %w", err)
 	}
 
 	// Get VMSS instances first to map names to instance IDs
@@ -237,8 +226,6 @@ func (vm *VMSSManager) GetVMSSNATPortMappings(ctx context.Context, vmssName, lbN
 
 	// Check for inbound NAT rules (created automatically for VMSS instances)
 	if lb.Properties != nil && lb.Properties.InboundNatRules != nil {
-		fmt.Printf("Found %d inbound NAT rules\n", len(lb.Properties.InboundNatRules))
-
 		for _, natRule := range lb.Properties.InboundNatRules {
 			if natRule.Name == nil || natRule.Properties == nil {
 				continue
@@ -282,8 +269,6 @@ func (vm *VMSSManager) GetVMSSNATPortMappings(ctx context.Context, vmssName, lbN
 
 	// If no individual NAT rules found, fall back to NAT pool logic (for older configurations)
 	if len(portMappings) == 0 {
-		fmt.Println("No individual NAT rules found, checking NAT pools...")
-
 		var sshNatPool *armnetwork.InboundNatPool
 		if lb.Properties != nil && lb.Properties.InboundNatPools != nil {
 			for _, pool := range lb.Properties.InboundNatPools {
@@ -300,8 +285,6 @@ func (vm *VMSSManager) GetVMSSNATPortMappings(ctx context.Context, vmssName, lbN
 				frontendPortStart = *sshNatPool.Properties.FrontendPortRangeStart
 			}
 
-			fmt.Printf("Using NAT pool fallback with port range starting at %d\n", frontendPortStart)
-
 			for _, instance := range instances {
 				instanceIDInt := 0
 				if instance.InstanceID != "" {
@@ -312,9 +295,6 @@ func (vm *VMSSManager) GetVMSSNATPortMappings(ctx context.Context, vmssName, lbN
 
 				natPort := int(frontendPortStart) + instanceIDInt
 				portMappings[instance.Name] = natPort
-
-				fmt.Printf("Mapped instance %s (ID: %s) to NAT port %d via pool calculation\n",
-					instance.Name, instance.InstanceID, natPort)
 			}
 		}
 	}
