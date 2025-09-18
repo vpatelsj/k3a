@@ -229,14 +229,13 @@ func (k *KubeadmInstaller) isNodeBootstrapped() bool {
 
 // ensureFirewallRules checks if required Kubernetes ports are open and configures them if needed
 func (k *KubeadmInstaller) ensureFirewallRules() error {
-	// Define required ports for Kubernetes
+	// Define required ports for Kubernetes (etcd removed since using external etcd)
 	requiredPorts := []struct {
 		port     string
 		protocol string
 		desc     string
 	}{
 		{"6443", "tcp", "API server"},
-		{"2379:2380", "tcp", "etcd"},
 		{"10250", "tcp", "kubelet"},
 		{"10259", "tcp", "kube-scheduler"},
 		{"10257", "tcp", "kube-controller-manager"},
@@ -311,13 +310,6 @@ func (k *KubeadmInstaller) isNodeInCluster() bool {
 		}
 	}
 
-	// Check if etcd data directory exists and is not empty
-	_, err = k.executeCommand("test -d /var/lib/etcd && [ \"$(ls -A /var/lib/etcd)\" ]")
-	if err == nil {
-		fmt.Println("Node is already part of a Kubernetes cluster (etcd data exists)")
-		return true
-	}
-
 	// Check if Kubernetes manifests exist
 	_, err = k.executeCommand("test -f /etc/kubernetes/manifests/kube-apiserver.yaml")
 	if err == nil {
@@ -350,8 +342,8 @@ func (k *KubeadmInstaller) installKubeadmPrerequisites() error {
 	// Configure dynamic iptables rules (these need to be applied each time)
 	firewallCommands := []string{
 		// Configure iptables to allow Kubernetes ports (CBL-Mariner compatible)
+		// etcd ports removed since using external etcd
 		"sudo iptables -I INPUT -p tcp --dport 6443 -j ACCEPT",        // API server
-		"sudo iptables -I INPUT -p tcp --dport 2379:2380 -j ACCEPT",   // etcd server client API
 		"sudo iptables -I INPUT -p tcp --dport 10250 -j ACCEPT",       // Kubelet API
 		"sudo iptables -I INPUT -p tcp --dport 10259 -j ACCEPT",       // kube-scheduler
 		"sudo iptables -I INPUT -p tcp --dport 10257 -j ACCEPT",       // kube-controller-manager
@@ -521,110 +513,38 @@ func (k *KubeadmInstaller) getSecretFromKeyVault(ctx context.Context, secretName
 	return *resp.Value, nil
 }
 
-// ensureJoinTokensExist generates and stores join tokens if they don't already exist
-func (k *KubeadmInstaller) ensureJoinTokensExist(ctx context.Context) error {
-	// First, ensure firewall rules are configured on the first master
-	if err := k.ensureFirewallRules(); err != nil {
-		fmt.Printf("Warning: Failed to configure firewall rules: %v\n", err)
-	}
-
-	// Check if tokens already exist in Key Vault
-	workerJoinSecretName := fmt.Sprintf("%s-worker-join", k.cluster)
-	masterJoinSecretName := fmt.Sprintf("%s-master-join", k.cluster)
-
-	// Try to get existing tokens
-	_, err := k.getSecretFromKeyVault(ctx, workerJoinSecretName)
-	workerTokenExists := (err == nil)
-
-	_, err = k.getSecretFromKeyVault(ctx, masterJoinSecretName)
-	masterTokenExists := (err == nil)
-
-	if workerTokenExists && masterTokenExists {
-		fmt.Println("Join tokens already exist in Key Vault")
-		return nil
-	}
-
-	fmt.Println("Generating missing join tokens...")
-
-	// Get internal IP for API endpoint
-	internalIPOutput, err := k.executeCommand("ip route get 1.1.1.1 | grep -oP 'src \\K\\S+'")
-	if err != nil {
-		return fmt.Errorf("failed to get internal IP: %w", err)
-	}
-	internalIP := strings.TrimSpace(internalIPOutput)
-	fmt.Printf("Using internal IP: %s\n", internalIP)
-
-	if !workerTokenExists {
-		// Generate worker join command
-		workerJoinOutput, err := k.executeCommand("sudo kubeadm token create --print-join-command 2>/dev/null")
-		if err != nil {
-			return fmt.Errorf("failed to generate worker join token: %w", err)
-		}
-		workerJoin := strings.TrimSpace(workerJoinOutput)
-
-		if err := k.storeSecretInKeyVault(ctx, workerJoinSecretName, workerJoin); err != nil {
-			return err
-		}
-		fmt.Println("Generated and stored worker join token")
-	}
-
-	if !masterTokenExists {
-		// Generate certificate key for master join
-		certKeyOutput, err := k.executeCommand("sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1")
-		if err != nil {
-			return fmt.Errorf("failed to generate certificate key: %w", err)
-		}
-		certKey := strings.TrimSpace(certKeyOutput)
-
-		// Get worker join command (either from Key Vault or generate new one)
-		var workerJoin string
-		if workerTokenExists {
-			workerJoin, err = k.getSecretFromKeyVault(ctx, workerJoinSecretName)
-			if err != nil {
-				return fmt.Errorf("failed to get worker join token: %w", err)
-			}
-		} else {
-			workerJoinOutput, err := k.executeCommand("sudo kubeadm token create --print-join-command 2>/dev/null")
-			if err != nil {
-				return fmt.Errorf("failed to generate worker join token: %w", err)
-			}
-			workerJoin = strings.TrimSpace(workerJoinOutput)
-		}
-
-		masterJoin := fmt.Sprintf("%s --control-plane --certificate-key %s", workerJoin, certKey)
-		if err := k.storeSecretInKeyVault(ctx, masterJoinSecretName, masterJoin); err != nil {
-			return err
-		}
-		fmt.Println("Generated and stored master join token")
-	}
-
-	// Store API server endpoint if it doesn't exist
-	apiEndpointSecretName := fmt.Sprintf("%s-api-endpoint", k.cluster)
-	_, err = k.getSecretFromKeyVault(ctx, apiEndpointSecretName)
-	if err != nil {
-		apiEndpoint := fmt.Sprintf("%s:6443", internalIP)
-		if err := k.storeSecretInKeyVault(ctx, apiEndpointSecretName, apiEndpoint); err != nil {
-			return err
-		}
-		fmt.Println("Stored API server endpoint")
-	}
-
-	fmt.Println("Join tokens are now available for other nodes")
-	return nil
-}
-
 // InstallAsFirstMaster installs kubeadm and bootstraps the first master node
 func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	fmt.Println("=== BOOTSTRAPPING FIRST MASTER NODE ===")
 
 	// Check if node is already part of a cluster
 	if k.isNodeInCluster() {
-		fmt.Println("Node is already part of a cluster, skipping initialization")
-		// But still need to ensure join tokens exist for other nodes
-		if err := k.loginToAzure(); err != nil {
-			return err
+		fmt.Println("Node is already part of a cluster")
+		fmt.Println("Resetting existing cluster to reconfigure for external etcd...")
+
+		// Reset the existing cluster
+		resetCmd := "sudo kubeadm reset --force"
+		_, err := k.executeCommand(resetCmd)
+		if err != nil {
+			fmt.Printf("Warning: Failed to reset cluster: %v, proceeding anyway\n", err)
 		}
-		return k.ensureJoinTokensExist(ctx)
+
+		// Clean up any remaining files and network state
+		cleanupCommands := []string{
+			"sudo rm -rf /etc/kubernetes/manifests/*",
+			"sudo rm -rf /etc/kubernetes/pki/*",
+			"sudo rm -rf /var/lib/kubelet/*",
+			"sudo rm -rf /var/lib/etcd/*", // Clean up embedded etcd data
+			"sudo systemctl stop kubelet",
+			"sudo systemctl stop containerd",
+			"sudo systemctl start containerd", // Restart containerd to clean containers
+		}
+
+		for _, cmd := range cleanupCommands {
+			k.executeCommand(cmd) // Ignore errors
+		}
+
+		fmt.Println("Cluster reset completed, proceeding with external etcd initialization...")
 	}
 
 	// Check if node is already bootstrapped, if not install prerequisites
@@ -665,11 +585,11 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 		region = "canadacentral" // fallback
 	}
 	dnsName := fmt.Sprintf("%s.%s.cloudapp.azure.com", k.cluster, region)
-	controlPlaneEndpoint := fmt.Sprintf("%s:6443", dnsName)
-	fmt.Printf("Using DNS control plane endpoint: %s\n", controlPlaneEndpoint) // Initialize Kubernetes cluster (use internal IP only for initialization)
-	// Note: We don't use --control-plane-endpoint during init because the load balancer
-	// backend pool and health probe aren't ready yet, which would cause init to fail.
-	// Instead, we initialize with internal IP and add the DNS name to certificate SAN for external access.
+	// Use internal IP for control plane endpoint to avoid external load balancer dependency
+	controlPlaneEndpoint := fmt.Sprintf("%s:6443", internalIP)
+	fmt.Printf("Using internal IP control plane endpoint: %s\n", controlPlaneEndpoint)
+	fmt.Printf("External DNS name for certificates: %s\n", dnsName)
+
 	fmt.Println("Initializing Kubernetes cluster...")
 
 	// Wait for kubeadm to be available first
@@ -677,13 +597,61 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 		return fmt.Errorf("kubeadm not available: %w", err)
 	}
 
-	// Extract just the hostname part of the control plane endpoint for SAN
-	sanHost := strings.Split(controlPlaneEndpoint, ":")[0]
-	initCommand := fmt.Sprintf("sudo kubeadm init --pod-network-cidr=10.244.0.0/16 --apiserver-advertise-address=%s --apiserver-cert-extra-sans=%s --upload-certs", internalIP, sanHost)
+	// Create kubeadm configuration file with external etcd
+	fmt.Println("Creating kubeadm configuration file...")
+
+	kubeadmConfig := fmt.Sprintf(`apiVersion: kubeadm.k8s.io/v1beta4
+kind: ClusterConfiguration
+kubernetesVersion: v1.33.1
+controlPlaneEndpoint: "%s"
+networking:
+  podSubnet: "10.244.0.0/16"
+  serviceSubnet: "172.20.0.0/16"
+apiServer:
+  certSANs:
+  - "%s"
+  - "%s"
+  extraArgs:
+  - name: etcd-compaction-interval
+    value: "0"
+controllerManager:
+  extraArgs:
+  - name: service-cluster-ip-range
+    value: "172.20.0.0/16"
+etcd:
+  external:
+    endpoints:
+    - "http://4.206.93.140:2379"
+---
+apiVersion: kubeadm.k8s.io/v1beta4
+kind: InitConfiguration
+localAPIEndpoint:
+  advertiseAddress: "%s"
+  bindPort: 6443
+---
+apiVersion: kubelet.config.k8s.io/v1beta1
+kind: KubeletConfiguration
+maxPods: 300
+`, controlPlaneEndpoint, internalIP, dnsName, internalIP)
+
+	// Write kubeadm config to temporary file
+	configCmd := fmt.Sprintf("cat > /tmp/kubeadm-config.yaml << 'EOF'\n%s\nEOF", kubeadmConfig)
+	_, err = k.executeCommand(configCmd)
+	if err != nil {
+		return fmt.Errorf("failed to create kubeadm config file: %w", err)
+	}
+
+	// Initialize Kubernetes cluster using config file
+	// Pre-pull recommended pause image version to avoid sandbox mismatch warnings
+	_, _ = k.executeCommand("sudo crictl pull registry.k8s.io/pause:3.10 || sudo ctr -n k8s.io images pull registry.k8s.io/pause:3.10 || true")
+	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs --ignore-preflight-errors=all"
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes cluster: %w", err)
 	}
+
+	// Clean up config file
+	k.executeCommand("rm -f /tmp/kubeadm-config.yaml")
 
 	// Configure kubectl for azureuser
 	fmt.Println("Configuring kubectl for azureuser...")
@@ -707,7 +675,8 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	}
 
 	// Replace the internal IP with load balancer public IP in kubeconfig
-	modifiedKubeconfig := strings.ReplaceAll(kubeconfigOutput, fmt.Sprintf("https://%s:6443", internalIP), fmt.Sprintf("https://%s", controlPlaneEndpoint))
+	externalEndpoint := fmt.Sprintf("%s:6443", dnsName)
+	modifiedKubeconfig := strings.ReplaceAll(kubeconfigOutput, fmt.Sprintf("https://%s:6443", internalIP), fmt.Sprintf("https://%s", externalEndpoint))
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-kubeconfig", k.cluster), modifiedKubeconfig); err != nil {
 		return err
 	}
@@ -763,7 +732,7 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	}
 
 	// Store API server endpoint (use load balancer public IP for external access)
-	apiEndpoint := controlPlaneEndpoint // Already includes :6443
+	apiEndpoint := externalEndpoint // Use external DNS name for client access
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-api-endpoint", k.cluster), apiEndpoint); err != nil {
 		return err
 	}
@@ -810,6 +779,8 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 
 	// Join cluster as additional control-plane node
 	fmt.Println("Joining cluster as additional control-plane node...")
+	// Pre-pull recommended pause image to align with kubeadm expectations
+	_, _ = k.executeCommand("sudo crictl pull registry.k8s.io/pause:3.10 || sudo ctr -n k8s.io images pull registry.k8s.io/pause:3.10 || true")
 
 	// Clean up the join command by removing newlines and extra whitespace
 	cleanedMasterJoin := strings.ReplaceAll(masterJoin, "\n", " ")
@@ -817,16 +788,20 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 	// Replace multiple spaces with single space
 	cleanedMasterJoin = strings.Join(strings.Fields(cleanedMasterJoin), " ")
 
-	// Add ignore-preflight-errors flag to handle controlPlaneEndpoint validation
-	// This is necessary when adding control plane nodes without a stable controlPlaneEndpoint initially
+	// For external etcd, we need to ensure the required certificates exist in the kubeadm-certs Secret
+	// Append ignore-preflight-errors only; allow kubeadm to download and decrypt certs
 	cleanedMasterJoin = fmt.Sprintf("%s --ignore-preflight-errors=all", cleanedMasterJoin)
 
 	// Properly format the join command by wrapping it in quotes to handle special characters
 	joinCommand := fmt.Sprintf("sudo bash -c \"%s\"", strings.ReplaceAll(cleanedMasterJoin, "\"", "\\\""))
 	fmt.Printf("Executing join command: %s\n", joinCommand)
-	_, err = k.executeCommand(joinCommand)
-	if err != nil {
-		return fmt.Errorf("failed to join cluster as master: %w", err)
+	output, err2 := k.executeCommand(joinCommand)
+	if err2 != nil {
+		// Detect cert decryption failure and provide remediation hints
+		if strings.Contains(output, "message authentication failed") || strings.Contains(output, "error decoding secret data") {
+			return fmt.Errorf("failed to join cluster as master: cert bundle decryption failed. Likely causes: (1) certificate key in join command no longer matches current 'kubeadm-certs' secret, (2) secret was modified (dummy or corrupted). Remediation: On first control-plane node run 'sudo kubeadm init phase upload-certs --upload-certs | tail -1' to get new key; update Key Vault master join secret with new key; ensure 'kubeadm-certs' secret was recreated; then retry. Original error: %w", err2)
+		}
+		return fmt.Errorf("failed to join cluster as master: %w", err2)
 	}
 
 	// Configure kubectl for azureuser
@@ -983,13 +958,13 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 		return fmt.Errorf("failed to get kubeadm-config ConfigMap: %w", err)
 	}
 
-	// Check if controlPlaneEndpoint is already set
-	if strings.Contains(currentConfig, "controlPlaneEndpoint") {
-		fmt.Println("controlPlaneEndpoint already configured in kubeadm-config")
+	// Check if controlPlaneEndpoint and external etcd are already set
+	if strings.Contains(currentConfig, "controlPlaneEndpoint") && strings.Contains(currentConfig, "external:") {
+		fmt.Println("controlPlaneEndpoint and external etcd already configured in kubeadm-config")
 		return nil
 	}
 
-	fmt.Printf("Adding controlPlaneEndpoint %s to kubeadm-config ConfigMap...\n", controlPlaneEndpoint)
+	fmt.Printf("Adding controlPlaneEndpoint %s and external etcd configuration to kubeadm-config ConfigMap...\n", controlPlaneEndpoint)
 
 	// Get the current ClusterConfiguration data
 	getClusterConfigCmd := "kubectl get configmap kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}'"
@@ -998,24 +973,34 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 		return fmt.Errorf("failed to get ClusterConfiguration: %w", err)
 	}
 
-	// Add controlPlaneEndpoint to the configuration
-	// We'll add it right after the apiVersion line
+	// Add controlPlaneEndpoint and etcd configuration to the configuration
+	// We'll add them right after the apiVersion line
 	lines := strings.Split(clusterConfig, "\n")
 	var newLines []string
 	added := false
 
 	for _, line := range lines {
 		newLines = append(newLines, line)
-		// Add controlPlaneEndpoint after apiVersion line
+		// Add controlPlaneEndpoint and etcd config after apiVersion line
 		if strings.HasPrefix(line, "apiVersion:") && !added {
 			newLines = append(newLines, fmt.Sprintf("controlPlaneEndpoint: %s", controlPlaneEndpoint))
+			newLines = append(newLines, "etcd:")
+			newLines = append(newLines, "  external:")
+			newLines = append(newLines, "    endpoints:")
+			newLines = append(newLines, "    - http://4.206.93.140:2379")
 			added = true
 		}
 	}
 
 	if !added {
 		// If apiVersion wasn't found, add it at the beginning after any initial lines
-		newLines = []string{fmt.Sprintf("controlPlaneEndpoint: %s", controlPlaneEndpoint)}
+		newLines = []string{
+			fmt.Sprintf("controlPlaneEndpoint: %s", controlPlaneEndpoint),
+			"etcd:",
+			"  external:",
+			"    endpoints:",
+			"    - http://4.206.93.140:2379",
+		}
 		newLines = append(newLines, lines...)
 	}
 
@@ -1038,6 +1023,6 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 	// Clean up temporary file
 	k.executeCommand("rm -f /tmp/cluster-config.yaml")
 
-	fmt.Printf("Successfully updated kubeadm-config with controlPlaneEndpoint: %s\n", controlPlaneEndpoint)
+	fmt.Printf("Successfully updated kubeadm-config with controlPlaneEndpoint: %s and external etcd configuration\n", controlPlaneEndpoint)
 	return nil
 }
