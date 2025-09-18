@@ -613,12 +613,26 @@ apiServer:
   - "%s"
   - "%s"
   extraArgs:
+  - name: max-requests-inflight
+    value: "400"
+  - name: max-mutating-requests-inflight
+    value: "100"
   - name: etcd-compaction-interval
     value: "0"
 controllerManager:
   extraArgs:
   - name: service-cluster-ip-range
     value: "172.20.0.0/16"
+  - name: kube-api-qps
+    value: "300"
+  - name: kube-api-burst
+    value: "400"
+  - name: node-monitor-period
+    value: "1m"
+  - name: node-monitor-grace-period
+    value: "10m"
+  - name: concurrent-job-syncs
+    value: "100"
 etcd:
   external:
     endpoints:
@@ -633,6 +647,17 @@ localAPIEndpoint:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 maxPods: 300
+podSandboxImage: mcr.microsoft.com/oss/v2/kubernetes/pause:3.10
+---
+apiVersion: kubescheduler.config.k8s.io/v1
+kind: KubeSchedulerConfiguration
+clientConnection:
+  kubeconfig: "/etc/kubernetes/scheduler.conf"
+  qps: 300
+  burst: 400
+percentageOfNodesToScore: 1
+profiles:
+  - schedulerName: default-scheduler
 `, controlPlaneEndpoint, internalIP, dnsName, internalIP)
 
 	// Write kubeadm config to temporary file
@@ -643,8 +668,9 @@ maxPods: 300
 	}
 
 	// Initialize Kubernetes cluster using config file
-	// Pre-pull recommended pause image version to avoid sandbox mismatch warnings
-	_, _ = k.executeCommand("sudo crictl pull registry.k8s.io/pause:3.10 || sudo ctr -n k8s.io images pull registry.k8s.io/pause:3.10 || true")
+	// Pre-pull specified pause image version to avoid sandbox mismatch warnings
+	_, _ = k.executeCommand("sudo crictl pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || sudo ctr -n k8s.io images pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || true")
+	// All component tuning now defined in kubeadm config YAML
 	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs --ignore-preflight-errors=all"
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
@@ -781,8 +807,8 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 
 	// Join cluster as additional control-plane node
 	fmt.Println("Joining cluster as additional control-plane node...")
-	// Pre-pull recommended pause image to align with kubeadm expectations
-	_, _ = k.executeCommand("sudo crictl pull registry.k8s.io/pause:3.10 || sudo ctr -n k8s.io images pull registry.k8s.io/pause:3.10 || true")
+	// Pre-pull pause image (configured via podSandboxImage) to align with kubeadm expectations
+	_, _ = k.executeCommand("sudo crictl pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || sudo ctr -n k8s.io images pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || true")
 
 	// Clean up the join command by removing newlines and extra whitespace
 	cleanedMasterJoin := strings.ReplaceAll(masterJoin, "\n", " ")
@@ -856,6 +882,8 @@ func (k *KubeadmInstaller) InstallAsWorker(ctx context.Context) error {
 
 	// Join cluster as worker node
 	fmt.Println("Joining cluster as worker node...")
+	// Pre-pull pause image to ensure kubelet uses the configured pod sandbox image
+	_, _ = k.executeCommand("sudo crictl pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || sudo ctr -n k8s.io images pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || true")
 
 	// Clean up the join command by removing newlines and extra whitespace
 	cleanedWorkerJoin := strings.ReplaceAll(workerJoin, "\n", " ")
