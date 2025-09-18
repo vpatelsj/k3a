@@ -133,14 +133,21 @@ func Create(args CreateRuleArgs) error {
 	}
 
 	// Wait for the rule creation to complete
-	pollerResp, err := client.BeginCreateOrUpdate(ctx, resourceGroup, lbName, armnetwork.LoadBalancer{
-		Location: location,
-		SKU:      sku,
-		Properties: &armnetwork.LoadBalancerPropertiesFormat{
-			LoadBalancingRules: existingRules,
-			Probes:             probes,
-		},
-	}, nil)
+	// Preserve all existing properties while updating rules and probes
+	updatedLB := armnetwork.LoadBalancer{
+		Location:   location,
+		SKU:        sku,
+		Properties: props, // Start with all existing properties
+	}
+
+	// Update only the rules and probes
+	if updatedLB.Properties == nil {
+		updatedLB.Properties = &armnetwork.LoadBalancerPropertiesFormat{}
+	}
+	updatedLB.Properties.LoadBalancingRules = existingRules
+	updatedLB.Properties.Probes = probes
+
+	pollerResp, err := client.BeginCreateOrUpdate(ctx, resourceGroup, lbName, updatedLB, nil)
 	if err != nil {
 		return err
 	}

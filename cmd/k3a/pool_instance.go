@@ -3,8 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/jwilder/k3a/pool"
 	"github.com/jwilder/k3a/pkg/spinner"
+	"github.com/jwilder/k3a/pool"
 	"github.com/spf13/cobra"
 )
 
@@ -33,6 +33,31 @@ var listInstancesPoolCmd = &cobra.Command{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,
 			PoolName:       poolName,
+		})
+	},
+}
+
+var natMappingsPoolCmd = &cobra.Command{
+	Use:   "nat",
+	Short: "Show NAT port mappings for VMSS instances (for SSH debugging).",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		subscriptionID, _ := cmd.Root().Flags().GetString("subscription")
+		if subscriptionID == "" {
+			return fmt.Errorf("--subscription flag is required (or set K3A_SUBSCRIPTION)")
+		}
+		cluster, _ := cmd.Flags().GetString("cluster")
+		if cluster == "" {
+			return fmt.Errorf("--cluster flag is required (or set K3A_CLUSTER)")
+		}
+		poolName, _ := cmd.Flags().GetString("name")
+		if poolName == "" {
+			return fmt.Errorf("--name flag is required")
+		}
+
+		return pool.ListNATMappings(pool.ListNATArgs{
+			SubscriptionID: subscriptionID,
+			Cluster:        cluster,
+			VMSSName:       poolName + "-vmss",
 		})
 	},
 }
@@ -157,8 +182,13 @@ func init() {
 	_ = reimageInstancePoolCmd.MarkFlagRequired("name")
 	_ = reimageInstancePoolCmd.MarkFlagRequired("instance-id")
 
+	natMappingsPoolCmd.Flags().String("cluster", clusterDefault, "Cluster name (or set K3A_CLUSTER) (required)")
+	natMappingsPoolCmd.Flags().String("name", "", "Name of the node pool (required)")
+	_ = natMappingsPoolCmd.MarkFlagRequired("name")
+
 	instancesPoolCmd.AddCommand(listInstancesPoolCmd)
 	instancesPoolCmd.AddCommand(deleteInstancePoolCmd)
 	instancesPoolCmd.AddCommand(updateInstancePoolCmd)
 	instancesPoolCmd.AddCommand(reimageInstancePoolCmd)
+	instancesPoolCmd.AddCommand(natMappingsPoolCmd)
 }

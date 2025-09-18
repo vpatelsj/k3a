@@ -139,6 +139,42 @@ var scalePoolCmd = &cobra.Command{
 	},
 }
 
+var kubeadmInstallCmd = &cobra.Command{
+	Use:   "kubeadm-install",
+	Short: "Install kubeadm on an existing VMSS pool.",
+	RunE: func(cmd *cobra.Command, args []string) error {
+		subscriptionID, _ := cmd.Root().Flags().GetString("subscription")
+		if subscriptionID == "" {
+			return fmt.Errorf("--subscription flag is required (or set K3A_SUBSCRIPTION)")
+		}
+		cluster, _ := cmd.Flags().GetString("cluster")
+		if cluster == "" {
+			return fmt.Errorf("--cluster flag is required (or set K3A_CLUSTER)")
+		}
+		name, _ := cmd.Flags().GetString("name")
+		if name == "" {
+			return fmt.Errorf("--name flag is required")
+		}
+		role, _ := cmd.Flags().GetString("role")
+		if role == "" {
+			return fmt.Errorf("--role flag is required")
+		}
+		k8sVersion, _ := cmd.Flags().GetString("k8s-version")
+
+		// Add spinner for kubeadm installation
+		stopSpinner := spinner.Spinner("Installing kubeadm on VMSS pool...")
+		defer stopSpinner()
+
+		return pool.KubeadmInstall(pool.KubeadmInstallArgs{
+			SubscriptionID: subscriptionID,
+			Cluster:        cluster,
+			Name:           name,
+			Role:           role,
+			K8sVersion:     k8sVersion,
+		})
+	},
+}
+
 func init() {
 	clusterDefault := ""
 	if v := os.Getenv("K3A_CLUSTER"); v != "" {
@@ -154,7 +190,7 @@ func init() {
 	createPoolCmd.Flags().String("region", "canadacentral", "Azure region for the pool")
 	createPoolCmd.Flags().Int("instance-count", 1, "Number of VMSS instances")
 	createPoolCmd.Flags().String("ssh-key", os.ExpandEnv("$HOME/.ssh/id_rsa.pub"), "Path to the SSH public key file")
-	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes (k3s) version (e.g. v1.33.1)")
+	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes version (e.g. v1.33.1)")
 	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Standard_D2s_v3)")
 	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
@@ -174,8 +210,16 @@ func init() {
 	_ = scalePoolCmd.MarkFlagRequired("name")
 	_ = scalePoolCmd.MarkFlagRequired("instance-count")
 
+	// Pool kubeadm install flags
+	kubeadmInstallCmd.Flags().String("cluster", clusterDefault, "Cluster name (or set K3A_CLUSTER) (required)")
+	kubeadmInstallCmd.Flags().String("name", "", "Name of the node pool (required)")
+	kubeadmInstallCmd.Flags().String("role", "", "Role of the node pool (control-plane or worker) (required)")
+	kubeadmInstallCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes version (e.g. v1.33.1)")
+	_ = kubeadmInstallCmd.MarkFlagRequired("name")
+	_ = kubeadmInstallCmd.MarkFlagRequired("role")
+
 	poolCmd.AddCommand(instancesPoolCmd)
-	poolCmd.AddCommand(listPoolsCmd, createPoolCmd, deletePoolCmd, scalePoolCmd)
+	poolCmd.AddCommand(listPoolsCmd, createPoolCmd, deletePoolCmd, scalePoolCmd, kubeadmInstallCmd)
 
 	rootCmd.AddCommand(poolCmd)
 }

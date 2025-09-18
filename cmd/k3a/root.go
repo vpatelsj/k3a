@@ -11,7 +11,7 @@ var subscriptionID string
 
 var rootCmd = &cobra.Command{
 	Use:               "k3a",
-	Short:             "k3s deployment and management tool for Azure",
+	Short:             "Kubernetes deployment and management tool for Azure",
 	CompletionOptions: cobra.CompletionOptions{DisableDefaultCmd: true},
 }
 

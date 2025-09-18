@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/postgresql/armpostgresqlflexibleservers"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 	kstrings "github.com/jwilder/k3a/pkg/strings"
 
@@ -22,7 +21,6 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/keyvault/armkeyvault"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/msi/armmsi"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/network/armnetwork"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/privatedns/armprivatedns"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armsubscriptions"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/storage/armstorage"
@@ -33,6 +31,35 @@ type CreateArgs struct {
 	Cluster          string
 	Location         string
 	VnetAddressSpace string
+}
+
+// retryRoleAssignment retries role assignment creation to handle AAD replication delays
+func retryRoleAssignment(ctx context.Context, client *armauthorization.RoleAssignmentsClient, scope, roleAssignmentName string, params armauthorization.RoleAssignmentCreateParameters) error {
+	const maxRetries = 5
+	const baseDelay = 2 * time.Second
+
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		_, err := client.Create(ctx, scope, roleAssignmentName, params, nil)
+		if err == nil {
+			return nil
+		}
+
+		// Check if it's a PrincipalNotFound error (replication delay)
+		if strings.Contains(err.Error(), "PrincipalNotFound") || strings.Contains(err.Error(), "does not exist in the directory") {
+			lastErr = err
+			if i < maxRetries-1 {
+				delay := time.Duration(i+1) * baseDelay // Linear backoff
+				fmt.Printf("Principal not found (replication delay), retrying in %v... (attempt %d/%d)\n", delay, i+1, maxRetries)
+				time.Sleep(delay)
+				continue
+			}
+		} else {
+			// For other errors, fail immediately
+			return err
+		}
+	}
+	return fmt.Errorf("role assignment failed after %d retries: %w", maxRetries, lastErr)
 }
 
 // createResourceGroup creates an Azure resource group
@@ -87,41 +114,41 @@ func createKeyVault(ctx context.Context, subscriptionID, cluster, location, vnet
 	keyVaultID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.KeyVault/vaults/%s", subscriptionID, cluster, keyVaultName)
 	certAdminRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/a4417e6f-fecd-4de8-b567-7b0420556985", subscriptionID)
 	certAdminRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "a4417e6f-fecd-4de8-b567-7b0420556985")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, certAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = retryRoleAssignment(ctx, roleAssignmentsClient, keyVaultID, certAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(certAdminRoleDefID),
 		},
-	}, nil); err != nil {
+	}); err != nil {
 		return "", fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
 	secretAdminRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/b86a8fe4-44ce-4948-aee5-eccb2c155cd7", subscriptionID)
 	secretAdminRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "b86a8fe4-44ce-4948-aee5-eccb2c155cd7")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, secretAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = retryRoleAssignment(ctx, roleAssignmentsClient, keyVaultID, secretAdminRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(secretAdminRoleDefID),
 		},
-	}, nil); err != nil {
+	}); err != nil {
 		return "", fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
 	certOfficerRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/14b46e9e-c2b7-41b4-b07b-48a6ebf60603", subscriptionID)
 	certOfficerRoleName := kstrings.DeterministicGUID(keyVaultID + msiPrincipalID + "14b46e9e-c2b7-41b4-b07b-48a6ebf60603")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, certOfficerRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = retryRoleAssignment(ctx, roleAssignmentsClient, keyVaultID, certOfficerRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(certOfficerRoleDefID),
 		},
-	}, nil); err != nil {
+	}); err != nil {
 		return "", fmt.Errorf("failed to assign Key Vault Certificate Officer role to MSI: %w", err)
 	}
 	callingPrincipalRoleName := kstrings.DeterministicGUID(keyVaultID + callingPrincipalID + "b86a8fe4-44ce-4948-aee5-eccb2c155cd7")
-	if _, err = roleAssignmentsClient.Create(ctx, keyVaultID, callingPrincipalRoleName, armauthorization.RoleAssignmentCreateParameters{
+	if err = retryRoleAssignment(ctx, roleAssignmentsClient, keyVaultID, callingPrincipalRoleName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(callingPrincipalID),
 			RoleDefinitionID: to.Ptr(secretAdminRoleDefID),
 		},
-	}, nil); err != nil {
+	}); err != nil {
 		return "", fmt.Errorf("failed to assign role to calling principal: %w", err)
 	}
 	return keyVaultName, nil
@@ -259,7 +286,7 @@ func Create(args CreateArgs) error {
 		return err
 	}
 
-	keyVaultName, err := createKeyVault(ctx, subscriptionID, cluster, location, vnetNamePrefix, msiPrincipalID, callingPrincipalID, cred, tenantID)
+	_, err = createKeyVault(ctx, subscriptionID, cluster, location, vnetNamePrefix, msiPrincipalID, callingPrincipalID, cred, tenantID)
 	if err != nil {
 		return err
 	}
@@ -296,12 +323,12 @@ func Create(args CreateArgs) error {
 	roleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/ba92f5b4-2d11-453d-a403-e96b0029c9fe", subscriptionID)
 	storageAccountID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Storage/storageAccounts/%s", subscriptionID, cluster, storageName)
 	roleAssignmentName := kstrings.DeterministicGUID(storageAccountID + msiID + "ba92f5b4-2d11-453d-a403-e96b0029c9fe")
-	_, err = roleAssignmentsClient.Create(ctx, storageAccountID, roleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+	err = retryRoleAssignment(ctx, roleAssignmentsClient, storageAccountID, roleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(roleDefID),
 		},
-	}, nil)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to assign role to MSI: %w", err)
 	}
@@ -309,48 +336,27 @@ func Create(args CreateArgs) error {
 	// Assign 'Storage Table Data Contributor' role to the MSI
 	tableRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3", subscriptionID)
 	tableRoleAssignmentName := kstrings.DeterministicGUID(storageAccountID + msiID + "0a9a7e1f-b9d0-4cc4-a60d-0319b160aaa3")
-	_, err = roleAssignmentsClient.Create(ctx, storageAccountID, tableRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
+	err = retryRoleAssignment(ctx, roleAssignmentsClient, storageAccountID, tableRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
 		Properties: &armauthorization.RoleAssignmentProperties{
 			PrincipalID:      to.Ptr(msiPrincipalID),
 			RoleDefinitionID: to.Ptr(tableRoleDefID),
 		},
-	}, nil)
+	})
 	if err != nil {
 		return fmt.Errorf("failed to assign Table Data Contributor role to MSI: %w", err)
 	}
 
-	postgresPassword, err := getSecretFromKeyVault(ctx, subscriptionID, keyVaultName, "postgres-admin-password")
-	if err != nil {
-		return fmt.Errorf("failed to get Postgres admin password from Key Vault: %w", err)
-	}
-	if postgresPassword == "" {
-		// Generate a strong password for Postgres
-		postgresPassword, err = kstrings.GeneratePassword(24)
-		if err != nil {
-			return fmt.Errorf("failed to generate postgres password: %w", err)
-		}
-	}
-
 	clusterHash := kstrings.UniqueString(cluster)
-	pgServerName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	if err := createPostgresFlexibleServer(ctx, subscriptionID, cluster, location, vnetNamePrefix, "azureuser", postgresPassword, clusterHash, cred); err != nil {
-		return fmt.Errorf("failed to create Postgres Flexible Server: %w", err)
-	}
 
-	if err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient); err != nil {
+	lbDNSName, err := createLoadBalancer(ctx, subscriptionID, cluster, location, vnetNamePrefix, clusterHash, cred, msiID, msiPrincipalID, roleAssignmentsClient)
+	if err != nil {
 		return fmt.Errorf("failed to create Load Balancer: %w", err)
 	}
 
-	// Reset the Postgres admin password to the generated password
-	if err := resetPostgresAdminPassword(ctx, subscriptionID, cluster, pgServerName, "azureuser", postgresPassword); err != nil {
-		return fmt.Errorf("failed to reset Postgres admin password: %w", err)
-	}
-
-	// Store the password in Key Vault
-	secretName := "postgres-admin-password"
-	if err := storeSecretInKeyVault(ctx, subscriptionID, keyVaultName, secretName, postgresPassword); err != nil {
-		return fmt.Errorf("failed to store secret in Key Vault: %w", err)
-	}
+	// Output the cluster information
+	fmt.Printf("Cluster resources created successfully!\n")
+	fmt.Printf("Load Balancer DNS: %s\n", lbDNSName)
+	fmt.Printf("Kubernetes API endpoint will be available at: https://%s:6443\n", lbDNSName)
 
 	return nil
 }
@@ -374,30 +380,7 @@ func storeSecretInKeyVault(ctx context.Context, subscriptionID, keyVaultName, se
 	return nil
 }
 
-// resetPostgresAdminPassword resets the admin password for the given Postgres server
-func resetPostgresAdminPassword(ctx context.Context, subscriptionID, resourceGroup, serverName, adminUsername, newPassword string) error {
-	cred, err := azidentity.NewDefaultAzureCredential(nil)
-	if err != nil {
-		return fmt.Errorf("failed to get Azure credential: %w", err)
-	}
-	client, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Postgres servers client: %w", err)
-	}
-
-	// Update the admin password
-	_, err = client.BeginUpdate(ctx, resourceGroup, serverName, armpostgresqlflexibleservers.ServerForUpdate{
-		Properties: &armpostgresqlflexibleservers.ServerPropertiesForUpdate{
-			AdministratorLoginPassword: to.Ptr(newPassword),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to update Postgres admin password: %w", err)
-	}
-	return nil
-}
-
-// createNetworkSecurityGroup creates a Network Security Group with default rules
+// createNetworkSecurityGroup creates a Network Security Group with default rules including CorpNetPublic access
 func createNetworkSecurityGroup(ctx context.Context, subscriptionID, resourceGroup, location, nsgName string, cred *azidentity.DefaultAzureCredential) (string, error) {
 	nsgClient, err := armnetwork.NewSecurityGroupsClient(subscriptionID, cred, nil)
 	if err != nil {
@@ -424,6 +407,34 @@ func createNetworkSecurityGroup(ctx context.Context, subscriptionID, resourceGro
 	if finalResp.SecurityGroup.ID == nil {
 		return "", fmt.Errorf("NSG creation did not return a valid ID")
 	}
+
+	// Add CorpNetPublic rule automatically
+	fmt.Println("Adding CorpNetPublic NSG rule...")
+	securityRulesClient, err := armnetwork.NewSecurityRulesClient(subscriptionID, cred, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to create security rules client: %w", err)
+	}
+
+	corpNetRule := armnetwork.SecurityRule{
+		Name: to.Ptr("AllowCorpNetPublic"),
+		Properties: &armnetwork.SecurityRulePropertiesFormat{
+			Priority:                 to.Ptr[int32](150),
+			Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
+			Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
+			Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolAsterisk),
+			SourceAddressPrefix:      to.Ptr("CorpNetPublic"),
+			SourcePortRange:          to.Ptr("*"),
+			DestinationAddressPrefix: to.Ptr("*"),
+			DestinationPortRange:     to.Ptr("*"),
+		},
+	}
+
+	_, err = securityRulesClient.BeginCreateOrUpdate(ctx, resourceGroup, nsgName, "AllowCorpNetPublic", corpNetRule, nil)
+	if err != nil {
+		return "", fmt.Errorf("failed to add CorpNetPublic NSG rule: %w", err)
+	}
+
+	fmt.Println("CorpNetPublic NSG rule added successfully")
 	return *finalResp.SecurityGroup.ID, nil
 }
 
@@ -447,21 +458,6 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 						NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
 					},
 				},
-				{
-					Name: to.Ptr("postgres"),
-					Properties: &armnetwork.SubnetPropertiesFormat{
-						AddressPrefix:        to.Ptr("10.2.0.0/24"),
-						NetworkSecurityGroup: &armnetwork.SecurityGroup{ID: to.Ptr(nsgID)},
-						Delegations: []*armnetwork.Delegation{
-							{
-								Name: to.Ptr("postgres-delegation"),
-								Properties: &armnetwork.ServiceDelegationPropertiesFormat{
-									ServiceName: to.Ptr("Microsoft.DBforPostgreSQL/flexibleServers"),
-								},
-							},
-						},
-					},
-				},
 			},
 		},
 	}, nil)
@@ -471,98 +467,15 @@ func createVirtualNetwork(ctx context.Context, subscriptionID, resourceGroup, lo
 	return nil
 }
 
-// createPostgresFlexibleServer provisions an Azure PostgreSQL Flexible Server matching the Bicep module configuration
-func createPostgresFlexibleServer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, adminUsername, adminPassword, clusterHash string, cred *azidentity.DefaultAzureCredential) error {
-	serverName := strings.ToLower(vnetNamePrefix + "pg" + clusterHash)
-	serversClient, err := armpostgresqlflexibleservers.NewServersClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create postgres servers client: %w", err)
-	}
-
-	// Build the delegated subnet resource ID
-	delegatedSubnetResourceID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s-vnet/subnets/postgres", subscriptionID, resourceGroup, vnetNamePrefix)
-
-	// Ensure the private DNS zone exists before creating the Postgres server
-	privateDnsZoneName := serverName + ".private.postgres.database.azure.com"
-	privateDnsZoneArmResourceId := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
-	privateDnsZonesClient, err := armprivatedns.NewPrivateZonesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zones client: %w", err)
-	}
-	_, err = privateDnsZonesClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, armprivatedns.PrivateZone{
-		Location: to.Ptr("global"),
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create or update private DNS zone: %w", err)
-	}
-
-	parameters := armpostgresqlflexibleservers.Server{
-		Location: to.Ptr(location),
-		Properties: &armpostgresqlflexibleservers.ServerProperties{
-			AdministratorLogin:         to.Ptr(adminUsername),
-			AdministratorLoginPassword: to.Ptr(adminPassword),
-			Version:                    to.Ptr(armpostgresqlflexibleservers.ServerVersion("15")),
-			Storage: &armpostgresqlflexibleservers.Storage{
-				StorageSizeGB: to.Ptr[int32](32),
-			},
-			HighAvailability: &armpostgresqlflexibleservers.HighAvailability{
-				Mode: to.Ptr(armpostgresqlflexibleservers.HighAvailabilityModeDisabled),
-			},
-			Backup: &armpostgresqlflexibleservers.Backup{
-				BackupRetentionDays: to.Ptr[int32](7),
-			},
-			Network: &armpostgresqlflexibleservers.Network{
-				DelegatedSubnetResourceID:   to.Ptr(delegatedSubnetResourceID),
-				PrivateDNSZoneArmResourceID: to.Ptr(privateDnsZoneArmResourceId),
-			},
-		},
-		SKU: &armpostgresqlflexibleservers.SKU{
-			Name: to.Ptr("Standard_D2s_v3"),
-			Tier: to.Ptr(armpostgresqlflexibleservers.SKUTierGeneralPurpose),
-		},
-	}
-
-	poller, err := serversClient.BeginCreate(ctx, resourceGroup, serverName, parameters, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin postgres server creation: %w", err)
-	}
-	_, err = poller.PollUntilDone(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create postgres server: %w", err)
-	}
-
-	// Link the Postgres private DNS zone to the VNet
-	vnetLinksClient, err := armprivatedns.NewVirtualNetworkLinksClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet links client: %w", err)
-	}
-	vnetName := vnetNamePrefix + "-vnet"
-	_, err = vnetLinksClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, "postgres-vnet-link", armprivatedns.VirtualNetworkLink{
-		Location: to.Ptr("global"),
-		Properties: &armprivatedns.VirtualNetworkLinkProperties{
-			VirtualNetwork: &armprivatedns.SubResource{
-				ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, resourceGroup, vnetName)),
-			},
-			RegistrationEnabled: to.Ptr(false),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create Postgres private DNS zone vnet link: %w", err)
-	}
-
-	return nil
-}
-
 // createLoadBalancer provisions a Standard Load Balancer, public IP, backend pool, NAT pool, outbound rule, and private DNS zone with VNet link
-func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, clusterHash string, cred *azidentity.DefaultAzureCredential, msiID string, msiPrincipalID string, roleAssignmentsClient *armauthorization.RoleAssignmentsClient) error {
+func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, location, vnetNamePrefix, clusterHash string, cred *azidentity.DefaultAzureCredential, msiID string, msiPrincipalID string, roleAssignmentsClient *armauthorization.RoleAssignmentsClient) (string, error) {
 	lbName := strings.ToLower(vnetNamePrefix + "lb" + clusterHash)
 	publicIPName := lbName + "-publicIP"
-	vnetName := vnetNamePrefix + "-vnet"
 
 	// 1. Create Public IP
 	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create public IP client: %w", err)
+		return "", fmt.Errorf("failed to create public IP client: %w", err)
 	}
 	_, err = publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, publicIPName, armnetwork.PublicIPAddress{
 		Location: to.Ptr(location),
@@ -571,23 +484,26 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 		Properties: &armnetwork.PublicIPAddressPropertiesFormat{
 			PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
+			DNSSettings: &armnetwork.PublicIPAddressDNSSettings{
+				DomainNameLabel: to.Ptr(resourceGroup), // Use resource group name (cluster name) as DNS label
+			},
 		},
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create public IP: %w", err)
+		return "", fmt.Errorf("failed to create public IP: %w", err)
 	}
 
 	// 2. Get Public IP resource ID
 	publicIP, err := publicIPClient.Get(ctx, resourceGroup, publicIPName, nil)
 	if err != nil {
-		return fmt.Errorf("failed to get public IP: %w", err)
+		return "", fmt.Errorf("failed to get public IP: %w", err)
 	}
 	publicIPID := *publicIP.ID
 
 	// 3. Create or Update Load Balancer
 	lbClient, err := armnetwork.NewLoadBalancersClient(subscriptionID, cred, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create load balancer client: %w", err)
+		return "", fmt.Errorf("failed to create load balancer client: %w", err)
 	}
 	frontendIPConfigName := "LoadBalancerFrontend"
 	backendPoolName := "outbound-pool"
@@ -663,57 +579,30 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 	}, nil)
 	if err != nil {
-		return fmt.Errorf("failed to create load balancer: %w", err)
+		return "", fmt.Errorf("failed to create load balancer: %w", err)
 	}
 
-	// 4. Create Private DNS Zone (cluster.internal) and VNet link
-	privateDnsZoneName := "cluster.internal"
-	privateDnsZonesClient, err := armprivatedns.NewPrivateZonesClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zones client: %w", err)
+	// 4. Wait for public IP to be assigned and get its FQDN
+	// The DNS label was already set when creating the public IP, so we just need to construct the FQDN
+	var publicIPFQDN string
+	for i := 0; i < 30; i++ { // Wait up to 5 minutes
+		updatedPublicIP, err := publicIPClient.Get(ctx, resourceGroup, publicIPName, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to get updated public IP: %w", err)
+		}
+		if updatedPublicIP.Properties != nil && updatedPublicIP.Properties.DNSSettings != nil && updatedPublicIP.Properties.DNSSettings.Fqdn != nil {
+			publicIPFQDN = *updatedPublicIP.Properties.DNSSettings.Fqdn
+			break
+		}
+		time.Sleep(10 * time.Second)
 	}
-	zonePoller, err := privateDnsZonesClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, armprivatedns.PrivateZone{
-		Location: to.Ptr("global"),
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to start private DNS zone creation: %w", err)
-	}
-	_, err = zonePoller.PollUntilDone(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create or update private DNS zone: %w", err)
-	}
-	vnetLinksClient, err := armprivatedns.NewVirtualNetworkLinksClient(subscriptionID, cred, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet links client: %w", err)
-	}
-	_, err = vnetLinksClient.BeginCreateOrUpdate(ctx, resourceGroup, privateDnsZoneName, "kubernetes-internal-link", armprivatedns.VirtualNetworkLink{
-		Location: to.Ptr("global"),
-		Properties: &armprivatedns.VirtualNetworkLinkProperties{
-			VirtualNetwork: &armprivatedns.SubResource{
-				ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/virtualNetworks/%s", subscriptionID, resourceGroup, vnetName)),
-			},
-			RegistrationEnabled: to.Ptr(false),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to create private DNS zone vnet link: %w", err)
+	if publicIPFQDN == "" {
+		return "", fmt.Errorf("failed to get public IP FQDN after waiting")
 	}
 
-	// Assign 'Private DNS Zone Contributor' role to the MSI for the private DNS zone
-	privateDnsZoneID := fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/privateDnsZones/%s", subscriptionID, resourceGroup, privateDnsZoneName)
-	privateDnsRoleDefID := fmt.Sprintf("/subscriptions/%s/providers/Microsoft.Authorization/roleDefinitions/b12aa53e-6015-4669-85d0-8515ebb3ae7f", subscriptionID)
-	privateDnsRoleAssignmentName := kstrings.DeterministicGUID(privateDnsZoneID + msiID + "b12aa53e-6015-4669-85d0-8515ebb3ae7f")
-	_, err = roleAssignmentsClient.Create(ctx, privateDnsZoneID, privateDnsRoleAssignmentName, armauthorization.RoleAssignmentCreateParameters{
-		Properties: &armauthorization.RoleAssignmentProperties{
-			PrincipalID:      to.Ptr(msiPrincipalID),
-			RoleDefinitionID: to.Ptr(privateDnsRoleDefID),
-		},
-	}, nil)
-	if err != nil {
-		return fmt.Errorf("failed to assign Private DNS Zone Contributor role to MSI: %w", err)
-	}
+	fmt.Printf("Public IP FQDN: %s\n", publicIPFQDN)
 
-	return nil
+	return publicIPFQDN, nil
 }
 
 // getSecretFromKeyVault retrieves a secret value from Azure Key Vault

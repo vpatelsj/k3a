@@ -111,7 +111,7 @@ func ListInstances(args ListInstancesArgs) error {
 				size = *vm.SKU.Name
 			}
 			zone := "-"
-			if vm.Zones != nil && len(vm.Zones) > 0 {
+			if len(vm.Zones) > 0 {
 				zone = *vm.Zones[0]
 			}
 			hostname := "-"
