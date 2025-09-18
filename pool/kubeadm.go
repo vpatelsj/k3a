@@ -135,6 +135,7 @@ func (k *KubeadmInstaller) checkAPIServerHealth(endpoint string) bool {
 	return true
 }
 
+
 // validateExistingCluster validates if there's a healthy existing cluster
 func (k *KubeadmInstaller) validateExistingCluster(ctx context.Context) bool {
 	client, err := azsecrets.NewClient(fmt.Sprintf("https://%s.vault.azure.net/", k.keyVaultName), k.credential, nil)
@@ -719,13 +720,12 @@ maxPods: 300
 		return err
 	}
 
-	// Master join command (with certificate key)
+	// Master join command will include certificate key after upload-certs
 	certKeyOutput, err := k.executeCommand("sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1")
 	if err != nil {
 		return fmt.Errorf("failed to generate certificate key: %w", err)
 	}
 	certKey := strings.TrimSpace(certKeyOutput)
-
 	masterJoin := fmt.Sprintf("%s --control-plane --certificate-key %s", workerJoinForCluster, certKey)
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-master-join", k.cluster), masterJoin); err != nil {
 		return err
@@ -736,6 +736,8 @@ maxPods: 300
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-api-endpoint", k.cluster), apiEndpoint); err != nil {
 		return err
 	}
+
+	// (legacy block removed – master join secret already written with certificate key)
 
 	fmt.Println("First master node setup completed successfully!")
 	return nil
@@ -788,18 +790,17 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 	// Replace multiple spaces with single space
 	cleanedMasterJoin = strings.Join(strings.Fields(cleanedMasterJoin), " ")
 
-	// For external etcd, we need to ensure the required certificates exist in the kubeadm-certs Secret
-	// Append ignore-preflight-errors only; allow kubeadm to download and decrypt certs
+	// Standard path: include ignore-preflight to relax system checks
 	cleanedMasterJoin = fmt.Sprintf("%s --ignore-preflight-errors=all", cleanedMasterJoin)
 
-	// Properly format the join command by wrapping it in quotes to handle special characters
+	// Execute join (kubeadm will perform download-certs if certificate-key present)
 	joinCommand := fmt.Sprintf("sudo bash -c \"%s\"", strings.ReplaceAll(cleanedMasterJoin, "\"", "\\\""))
 	fmt.Printf("Executing join command: %s\n", joinCommand)
 	output, err2 := k.executeCommand(joinCommand)
 	if err2 != nil {
 		// Detect cert decryption failure and provide remediation hints
-		if strings.Contains(output, "message authentication failed") || strings.Contains(output, "error decoding secret data") {
-			return fmt.Errorf("failed to join cluster as master: cert bundle decryption failed. Likely causes: (1) certificate key in join command no longer matches current 'kubeadm-certs' secret, (2) secret was modified (dummy or corrupted). Remediation: On first control-plane node run 'sudo kubeadm init phase upload-certs --upload-certs | tail -1' to get new key; update Key Vault master join secret with new key; ensure 'kubeadm-certs' secret was recreated; then retry. Original error: %w", err2)
+		if strings.Contains(output, "download-certs") || strings.Contains(output, "error decoding secret data") || strings.Contains(output, "message authentication failed") {
+			return fmt.Errorf("failed to join cluster as master: unexpected attempt to download certs (legacy path). Ensure PKI bundle secret exists and join command omits --certificate-key. Raw error: %w", err2)
 		}
 		return fmt.Errorf("failed to join cluster as master: %w", err2)
 	}
