@@ -11,13 +11,26 @@ packages:
   - git
   - unzip
   - ca-certificates
-  - moby-runc
-  - moby-containerd
+  - containerd
+  - docker
 
 # Complete system setup for Kubernetes
 runcmd:
-  # Install Azure CLI for CBL-Mariner (RPM-based)
-  - sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc
+  # Add retry logic and better error handling for package installation
+  - sleep 30  # Wait to avoid immediate rate limiting
+  
+  # Install Azure CLI for CBL-Mariner (RPM-based) with infinite retries
+  - |
+    attempt=1
+    while true; do
+      echo "Attempt $attempt: Installing Azure CLI GPG key..."
+      if sudo rpm --import https://packages.microsoft.com/keys/microsoft.asc; then
+        break
+      fi
+      echo "Failed attempt $attempt, waiting 60 seconds..."
+      sleep 60
+      attempt=$((attempt + 1))
+    done
   - |
     cat <<EOF | sudo tee /etc/yum.repos.d/azure-cli.repo
     [azure-cli]
@@ -27,14 +40,38 @@ runcmd:
     gpgcheck=1
     gpgkey=https://packages.microsoft.com/keys/microsoft.asc
     EOF
-  - sudo tdnf install -y azure-cli
+  - |
+    attempt=1
+    while true; do
+      echo "Attempt $attempt: Installing Azure CLI..."
+      if sudo tdnf install -y azure-cli; then
+        break
+      fi
+      echo "Failed attempt $attempt, waiting 60 seconds..."
+      sleep 60
+      attempt=$((attempt + 1))
+    done
   
-  # Setup container runtime
-  - sudo systemctl enable --now containerd
+  # Setup container runtime with proper checks
+  - |
+    # Enable containerd service (may already be installed via packages)
+    if systemctl list-unit-files | grep -q containerd.service; then
+      sudo systemctl enable --now containerd
+    else
+      echo "Warning: containerd.service not found, trying to install manually"
+      sudo tdnf install -y containerd || echo "Failed to install containerd"
+      sudo systemctl enable --now containerd || echo "Failed to start containerd"
+    fi
   - sudo mkdir -p /etc/containerd
-  - sudo containerd config default | sudo tee /etc/containerd/config.toml
-  - sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
-  - sudo systemctl restart containerd
+  - |
+    # Generate containerd config with error handling
+    if command -v containerd >/dev/null 2>&1; then
+      sudo containerd config default | sudo tee /etc/containerd/config.toml
+      sudo sed -i 's/SystemdCgroup = false/SystemdCgroup = true/g' /etc/containerd/config.toml
+      sudo systemctl restart containerd
+    else
+      echo "Warning: containerd binary not found"
+    fi
   
   # Setup Kubernetes kernel modules and networking
   - |
