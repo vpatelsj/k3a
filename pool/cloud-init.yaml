@@ -103,54 +103,106 @@ runcmd:
   - sudo mkdir -p /etc/iptables
   - sudo sh -c 'iptables-save > /etc/iptables/rules.v4'
 
-  # Auto-join worker nodes to cluster
+  # Create systemd service for worker node auto-join (more reliable than cloud-init)
   - |
     if [ "{{.Role}}" = "worker" ]; then
-      echo "Starting worker node auto-join process..." >> /var/log/k3a-worker-join.log
-      
-      # Wait for Azure CLI to be available
-      timeout 300 bash -c 'until az --version >/dev/null 2>&1; do sleep 5; done' || {
-        echo "Azure CLI not available after timeout" >> /var/log/k3a-worker-join.log
-        exit 1
-      }
-      
-      # Login using managed identity
-      az login --identity >> /var/log/k3a-worker-join.log 2>&1
-      
-      # Wait for worker join token to be available in Key Vault
-      KEYVAULT_NAME="{{.KeyVaultName}}"
-      SECRET_NAME="{{.ResourceGroup}}-worker-join"
-      
-      echo "Waiting for worker join token from Key Vault: $KEYVAULT_NAME" >> /var/log/k3a-worker-join.log
-      for i in {1..60}; do
-        if JOIN_COMMAND=$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$SECRET_NAME" --query "value" --output tsv 2>/dev/null); then
-          echo "Retrieved worker join command" >> /var/log/k3a-worker-join.log
-          break
-        fi
-        echo "Attempt $i: Worker join token not yet available, waiting..." >> /var/log/k3a-worker-join.log
-        sleep 10
-      done
-      
-      if [ -z "$JOIN_COMMAND" ]; then
-        echo "Failed to retrieve worker join command after 10 minutes" >> /var/log/k3a-worker-join.log
-        exit 1
-      fi
-      
-      # Execute the join command
-      echo "Executing kubeadm join..." >> /var/log/k3a-worker-join.log
-      eval "sudo $JOIN_COMMAND" >> /var/log/k3a-worker-join.log 2>&1
-      
-      if [ $? -eq 0 ]; then
-        echo "Worker node successfully joined the cluster!" >> /var/log/k3a-worker-join.log
-        echo "worker-joined" > /var/lib/cloud/k3a-worker-status
-      else
-        echo "Failed to join worker node to cluster" >> /var/log/k3a-worker-join.log
-        echo "worker-join-failed" > /var/lib/cloud/k3a-worker-status
-        exit 1
-      fi
+      # Make script executable and enable service
+      chmod +x /usr/local/bin/k3a-worker-join.sh
+      systemctl daemon-reload
+      systemctl enable k3a-worker-join.service
+      systemctl start k3a-worker-join.service
     fi
 
 write_files:
+  # Create worker auto-join script
+  - path: /usr/local/bin/k3a-worker-join.sh
+    content: |
+      #!/bin/bash
+
+      LOG_FILE="/var/log/k3a-worker-join.log"
+      STATUS_FILE="/var/lib/cloud/k3a-worker-status"
+
+      log() {
+          echo "$(date): $1" | tee -a "$LOG_FILE"
+      }
+
+      # Check if already joined
+      if [ -f "$STATUS_FILE" ] && [ "$(cat $STATUS_FILE)" = "worker-joined" ]; then
+          log "Worker node already joined cluster, exiting"
+          exit 0
+      fi
+
+      log "Starting worker node auto-join process..."
+
+      # Wait for Azure CLI to be available
+      timeout 300 bash -c 'until az --version >/dev/null 2>&1; do sleep 5; done' || {
+          log "Azure CLI not available after timeout"
+          exit 1
+      }
+
+      # Login using managed identity
+      log "Logging in with managed identity..."
+      if ! az login --identity >> "$LOG_FILE" 2>&1; then
+          log "Failed to login with managed identity"
+          exit 1
+      fi
+
+      # Wait for worker join token to be available in Key Vault
+      KEYVAULT_NAME="{{.KeyVaultName}}"
+      SECRET_NAME="{{.ResourceGroup}}-worker-join"
+
+      log "Waiting for worker join token from Key Vault: $KEYVAULT_NAME"
+      for i in {1..60}; do
+          if JOIN_COMMAND=$(az keyvault secret show --vault-name "$KEYVAULT_NAME" --name "$SECRET_NAME" --query "value" --output tsv 2>/dev/null); then
+              log "Retrieved worker join command"
+              break
+          fi
+          log "Attempt $i: Worker join token not yet available, waiting..."
+          sleep 10
+      done
+
+      if [ -z "$JOIN_COMMAND" ]; then
+          log "Failed to retrieve worker join command after 10 minutes"
+          exit 1
+      fi
+
+      # Execute the join command
+      log "Executing kubeadm join..."
+      if eval "sudo $JOIN_COMMAND" >> "$LOG_FILE" 2>&1; then
+          log "Worker node successfully joined the cluster!"
+          echo "worker-joined" > "$STATUS_FILE"
+          exit 0
+      else
+          log "Failed to join worker node to cluster"
+          echo "worker-join-failed" > "$STATUS_FILE"
+          exit 1
+      fi
+    permissions: '0755'
+    owner: root:root
+
+  # Create systemd service file
+  - path: /etc/systemd/system/k3a-worker-join.service
+    content: |
+      [Unit]
+      Description=K3A Worker Node Auto-Join Service
+      After=network-online.target
+      Wants=network-online.target
+      StartLimitIntervalSec=0
+
+      [Service]
+      Type=oneshot
+      ExecStart=/usr/local/bin/k3a-worker-join.sh
+      Restart=on-failure
+      RestartSec=30
+      StandardOutput=journal
+      StandardError=journal
+      User=root
+
+      [Install]
+      WantedBy=multi-user.target
+    permissions: '0644'
+    owner: root:root
+
   # Create a marker file to indicate cloud-init completion
   - path: /var/lib/cloud/k3a-ready
     content: |
@@ -161,7 +213,7 @@ write_files:
 
 # Ensure services are enabled
 bootcmd:
-  - systemctl enable ssh
+  - systemctl enable sshd
 
 # Final message
 final_message: "k3a node cloud-init setup completed. All prerequisites installed. Ready for kubeadm cluster initialization via SSH."
