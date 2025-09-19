@@ -472,7 +472,7 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 	lbName := strings.ToLower(vnetNamePrefix + "lb" + clusterHash)
 	publicIPName := lbName + "-publicIP"
 
-	// 1. Create Public IP
+	// 1. Create Primary Public IP (for inbound traffic)
 	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(subscriptionID, cred, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to create public IP client: %w", err)
@@ -490,10 +490,35 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 	}, nil)
 	if err != nil {
-		return "", fmt.Errorf("failed to create public IP: %w", err)
+		return "", fmt.Errorf("failed to create primary public IP: %w", err)
 	}
 
-	// 2. Get Public IP resource ID
+	// 2. Create 5 additional Public IPs for outbound rules
+	outboundPublicIPIDs := make([]string, 5)
+	for i := 0; i < 5; i++ {
+		outboundIPName := fmt.Sprintf("%s-outbound-ip-%d", lbName, i+1)
+		_, err = publicIPClient.BeginCreateOrUpdate(ctx, resourceGroup, outboundIPName, armnetwork.PublicIPAddress{
+			Location: to.Ptr(location),
+			SKU: &armnetwork.PublicIPAddressSKU{
+				Name: to.Ptr(armnetwork.PublicIPAddressSKUNameStandard),
+			},
+			Properties: &armnetwork.PublicIPAddressPropertiesFormat{
+				PublicIPAllocationMethod: to.Ptr(armnetwork.IPAllocationMethodStatic),
+			},
+		}, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create outbound public IP %d: %w", i+1, err)
+		}
+
+		// Get the resource ID
+		outboundPublicIP, err := publicIPClient.Get(ctx, resourceGroup, outboundIPName, nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to get outbound public IP %d: %w", i+1, err)
+		}
+		outboundPublicIPIDs[i] = *outboundPublicIP.ID
+	}
+
+	// 3. Get Primary Public IP resource ID
 	publicIP, err := publicIPClient.Get(ctx, resourceGroup, publicIPName, nil)
 	if err != nil {
 		return "", fmt.Errorf("failed to get public IP: %w", err)
@@ -530,20 +555,41 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		})
 	}
 
+	// 4. Create Frontend IP Configurations (1 primary + 5 outbound)
+	frontendIPConfigurations := []*armnetwork.FrontendIPConfiguration{
+		// Primary frontend IP (for inbound traffic and DNS)
+		{
+			Name: to.Ptr(frontendIPConfigName),
+			Properties: &armnetwork.FrontendIPConfigurationPropertiesFormat{
+				PublicIPAddress: &armnetwork.PublicIPAddress{ID: to.Ptr(publicIPID)},
+			},
+		},
+	}
+
+	// Add 5 outbound frontend IP configurations
+	outboundFrontendIPRefs := []*armnetwork.SubResource{}
+	for i := 0; i < 5; i++ {
+		outboundFrontendName := fmt.Sprintf("outbound-frontend-%d", i+1)
+		frontendIPConfigurations = append(frontendIPConfigurations, &armnetwork.FrontendIPConfiguration{
+			Name: to.Ptr(outboundFrontendName),
+			Properties: &armnetwork.FrontendIPConfigurationPropertiesFormat{
+				PublicIPAddress: &armnetwork.PublicIPAddress{ID: to.Ptr(outboundPublicIPIDs[i])},
+			},
+		})
+		
+		// Add reference for outbound rule
+		outboundFrontendIPRefs = append(outboundFrontendIPRefs, &armnetwork.SubResource{
+			ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/frontendIPConfigurations/%s", subscriptionID, resourceGroup, lbName, outboundFrontendName)),
+		})
+	}
+
 	_, err = lbClient.BeginCreateOrUpdate(ctx, resourceGroup, lbName, armnetwork.LoadBalancer{
 		Location: to.Ptr(location),
 		SKU: &armnetwork.LoadBalancerSKU{
 			Name: to.Ptr(armnetwork.LoadBalancerSKUNameStandard),
 		},
 		Properties: &armnetwork.LoadBalancerPropertiesFormat{
-			FrontendIPConfigurations: []*armnetwork.FrontendIPConfiguration{
-				{
-					Name: to.Ptr(frontendIPConfigName),
-					Properties: &armnetwork.FrontendIPConfigurationPropertiesFormat{
-						PublicIPAddress: &armnetwork.PublicIPAddress{ID: to.Ptr(publicIPID)},
-					},
-				},
-			},
+			FrontendIPConfigurations: frontendIPConfigurations,
 			BackendAddressPools: existingBackendPools,
 			InboundNatPools: []*armnetwork.InboundNatPool{
 				{
@@ -560,19 +606,19 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 				},
 			},
 			OutboundRules: []*armnetwork.OutboundRule{
+				// Configure outbound rule to support large-scale deployments (1100+ VMSS instances)
+				// Configure outbound SNAT ports
+				// With 5 public IPs providing 64K ports each = 320,000 total available SNAT ports
+				// Setting 192 ports per instance for up to 1,666 instances (320,000/192)
 				{
 					Name: to.Ptr(outboundRuleName),
 					Properties: &armnetwork.OutboundRulePropertiesFormat{
 						BackendAddressPool: &armnetwork.SubResource{
 							ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/backendAddressPools/%s", subscriptionID, resourceGroup, lbName, backendPoolName)),
 						},
-						FrontendIPConfigurations: []*armnetwork.SubResource{
-							{
-								ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/frontendIPConfigurations/%s", subscriptionID, resourceGroup, lbName, frontendIPConfigName)),
-							},
-						},
+						FrontendIPConfigurations: outboundFrontendIPRefs, // Use all 5 outbound IPs
 						Protocol:               to.Ptr(armnetwork.LoadBalancerOutboundRuleProtocolAll),
-						AllocatedOutboundPorts: to.Ptr[int32](1000),
+						AllocatedOutboundPorts: to.Ptr[int32](192), // 192 SNAT ports per backend instance
 					},
 				},
 			},

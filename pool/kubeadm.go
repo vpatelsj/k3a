@@ -135,7 +135,6 @@ func (k *KubeadmInstaller) checkAPIServerHealth(endpoint string) bool {
 	return true
 }
 
-
 // validateExistingCluster validates if there's a healthy existing cluster
 func (k *KubeadmInstaller) validateExistingCluster(ctx context.Context) bool {
 	client, err := azsecrets.NewClient(fmt.Sprintf("https://%s.vault.azure.net/", k.keyVaultName), k.credential, nil)
@@ -606,7 +605,7 @@ kind: ClusterConfiguration
 kubernetesVersion: v1.33.1
 controlPlaneEndpoint: "%s"
 networking:
-  podSubnet: "10.244.0.0/16"
+  podSubnet: "16.0.0.0/5"
   serviceSubnet: "172.20.0.0/16"
 apiServer:
   certSANs:
@@ -621,6 +620,10 @@ apiServer:
     value: "0"
 controllerManager:
   extraArgs:
+  - name: cluster-cidr
+    value: "16.0.0.0/5"
+  - name: node-cidr-mask-size-ipv4
+    value: "21"
   - name: service-cluster-ip-range
     value: "172.20.0.0/16"
   - name: kube-api-qps
@@ -647,7 +650,6 @@ localAPIEndpoint:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 maxPods: 300
-podSandboxImage: mcr.microsoft.com/oss/v2/kubernetes/pause:3.10
 ---
 apiVersion: kubescheduler.config.k8s.io/v1
 kind: KubeSchedulerConfiguration
@@ -668,9 +670,7 @@ profiles:
 	}
 
 	// Initialize Kubernetes cluster using config file
-	// Pre-pull specified pause image version to avoid sandbox mismatch warnings
-	_, _ = k.executeCommand("sudo crictl pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || sudo ctr -n k8s.io images pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || true")
-	// All component tuning now defined in kubeadm config YAML
+	// containerd already configured with correct pause image via cloud-init
 	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs --ignore-preflight-errors=all"
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
@@ -714,6 +714,31 @@ profiles:
 	_, err = k.executeCommand("kubectl apply -f https://github.com/flannel-io/flannel/releases/latest/download/kube-flannel.yml")
 	if err != nil {
 		return fmt.Errorf("failed to install Flannel CNI: %w", err)
+	}
+
+	// Install local path provisioner for persistent storage
+	fmt.Println("Installing local path provisioner...")
+	_, err = k.executeCommand("kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.28/deploy/local-path-storage.yaml")
+	if err != nil {
+		return fmt.Errorf("failed to install local path provisioner: %w", err)
+	}
+
+	// Configure DaemonSets to avoid scheduling on hollow nodes
+	fmt.Println("Configuring DaemonSets to exclude hollow nodes...")
+
+	// Update kube-proxy DaemonSet to exclude hollow nodes
+	kubeProxyPatch := `{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/os","operator":"In","values":["linux"]},{"key":"kubemark","operator":"NotIn","values":["true"]}]}]}}}}}}}`
+	_, err = k.executeCommand(fmt.Sprintf("kubectl patch ds kube-proxy -n kube-system --type='strategic' -p='%s'", kubeProxyPatch))
+	if err != nil {
+		fmt.Printf("Warning: failed to patch kube-proxy DaemonSet (may not exist yet): %v\n", err)
+	}
+
+	// Update flannel DaemonSet to exclude hollow nodes (wait a bit for flannel to be ready)
+	time.Sleep(30 * time.Second)
+	flannelPatch := `{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/os","operator":"In","values":["linux"]},{"key":"kubemark","operator":"NotIn","values":["true"]}]}]}}}}}}}`
+	_, err = k.executeCommand(fmt.Sprintf("kubectl patch ds kube-flannel-ds -n kube-flannel --type='strategic' -p='%s'", flannelPatch))
+	if err != nil {
+		fmt.Printf("Warning: failed to patch flannel DaemonSet (may not exist yet): %v\n", err)
 	}
 
 	// Wait for system to stabilize
@@ -807,8 +832,7 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 
 	// Join cluster as additional control-plane node
 	fmt.Println("Joining cluster as additional control-plane node...")
-	// Pre-pull pause image (configured via podSandboxImage) to align with kubeadm expectations
-	_, _ = k.executeCommand("sudo crictl pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || sudo ctr -n k8s.io images pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || true")
+	// containerd already configured with correct pause image via cloud-init
 
 	// Clean up the join command by removing newlines and extra whitespace
 	cleanedMasterJoin := strings.ReplaceAll(masterJoin, "\n", " ")
@@ -882,8 +906,7 @@ func (k *KubeadmInstaller) InstallAsWorker(ctx context.Context) error {
 
 	// Join cluster as worker node
 	fmt.Println("Joining cluster as worker node...")
-	// Pre-pull pause image to ensure kubelet uses the configured pod sandbox image
-	_, _ = k.executeCommand("sudo crictl pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || sudo ctr -n k8s.io images pull mcr.microsoft.com/oss/v2/kubernetes/pause:3.10 || true")
+	// containerd already configured with correct pause image via cloud-init
 
 	// Clean up the join command by removing newlines and extra whitespace
 	cleanedWorkerJoin := strings.ReplaceAll(workerJoin, "\n", " ")
