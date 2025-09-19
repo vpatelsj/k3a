@@ -576,7 +576,7 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 				PublicIPAddress: &armnetwork.PublicIPAddress{ID: to.Ptr(outboundPublicIPIDs[i])},
 			},
 		})
-		
+
 		// Add reference for outbound rule
 		outboundFrontendIPRefs = append(outboundFrontendIPRefs, &armnetwork.SubResource{
 			ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/frontendIPConfigurations/%s", subscriptionID, resourceGroup, lbName, outboundFrontendName)),
@@ -590,7 +590,7 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 		},
 		Properties: &armnetwork.LoadBalancerPropertiesFormat{
 			FrontendIPConfigurations: frontendIPConfigurations,
-			BackendAddressPools: existingBackendPools,
+			BackendAddressPools:      existingBackendPools,
 			InboundNatPools: []*armnetwork.InboundNatPool{
 				{
 					Name: to.Ptr(sshNatPoolName),
@@ -617,8 +617,8 @@ func createLoadBalancer(ctx context.Context, subscriptionID, resourceGroup, loca
 							ID: to.Ptr(fmt.Sprintf("/subscriptions/%s/resourceGroups/%s/providers/Microsoft.Network/loadBalancers/%s/backendAddressPools/%s", subscriptionID, resourceGroup, lbName, backendPoolName)),
 						},
 						FrontendIPConfigurations: outboundFrontendIPRefs, // Use all 5 outbound IPs
-						Protocol:               to.Ptr(armnetwork.LoadBalancerOutboundRuleProtocolAll),
-						AllocatedOutboundPorts: to.Ptr[int32](192), // 192 SNAT ports per backend instance
+						Protocol:                 to.Ptr(armnetwork.LoadBalancerOutboundRuleProtocolAll),
+						AllocatedOutboundPorts:   to.Ptr[int32](192), // 192 SNAT ports per backend instance
 					},
 				},
 			},
