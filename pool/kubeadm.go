@@ -671,10 +671,24 @@ profiles:
 
 	// Initialize Kubernetes cluster using config file
 	// containerd already configured with correct pause image via cloud-init
-	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs --ignore-preflight-errors=all"
+	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs --skip-phases=upload-config --ignore-preflight-errors=all"
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes cluster: %w", err)
+	}
+
+	// Ensure kubernetes-admin has cluster-admin privileges before uploading config
+	fmt.Println("Ensuring kubernetes-admin has cluster-admin privileges...")
+	clusterRoleBindingCmd := "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf create clusterrolebinding kubeadm:cluster-admin --clusterrole=cluster-admin --user=kubernetes-admin --dry-run=client -o yaml | sudo kubectl apply -f -"
+	if _, err := k.executeCommand(clusterRoleBindingCmd); err != nil {
+		return fmt.Errorf("failed to ensure cluster-admin binding: %w", err)
+	}
+
+	// Upload the kubeadm ClusterConfiguration ConfigMap manually since the phase was skipped
+	fmt.Println("Uploading kubeadm ClusterConfiguration ConfigMap...")
+	uploadConfigCmd := "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/kubeadm-config.yaml -n kube-system --dry-run=client -o yaml | sudo kubectl apply -f -"
+	if _, err := k.executeCommand(uploadConfigCmd); err != nil {
+		return fmt.Errorf("failed to upload kubeadm ClusterConfiguration: %w", err)
 	}
 
 	// Clean up config file
