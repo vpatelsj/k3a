@@ -651,7 +651,7 @@ apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 maxPods: 300
 ---
-apiVersion: kubescheduler.config.k8s.io/v1
+apiVersion: kubescheduler.config.k8s.io/v1beta3
 kind: KubeSchedulerConfiguration
 clientConnection:
   kubeconfig: "/etc/kubernetes/scheduler.conf"
@@ -679,14 +679,14 @@ profiles:
 
 	// Ensure kubernetes-admin has cluster-admin privileges before uploading config
 	fmt.Println("Ensuring kubernetes-admin has cluster-admin privileges...")
-	clusterRoleBindingCmd := "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf create clusterrolebinding kubeadm:cluster-admin --clusterrole=cluster-admin --user=kubernetes-admin --dry-run=client -o yaml | sudo kubectl apply -f -"
+	clusterRoleBindingCmd := "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl create clusterrolebinding kubeadm:cluster-admin --clusterrole=cluster-admin --user=kubernetes-admin --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply --validate=false -f -"
 	if _, err := k.executeCommand(clusterRoleBindingCmd); err != nil {
 		return fmt.Errorf("failed to ensure cluster-admin binding: %w", err)
 	}
 
 	// Upload the kubeadm ClusterConfiguration ConfigMap manually since the phase was skipped
 	fmt.Println("Uploading kubeadm ClusterConfiguration ConfigMap...")
-	uploadConfigCmd := "sudo kubectl --kubeconfig /etc/kubernetes/admin.conf create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/kubeadm-config.yaml -n kube-system --dry-run=client -o yaml | sudo kubectl apply -f -"
+	uploadConfigCmd := "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/kubeadm-config.yaml -n kube-system --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply --validate=false -f -"
 	if _, err := k.executeCommand(uploadConfigCmd); err != nil {
 		return fmt.Errorf("failed to upload kubeadm ClusterConfiguration: %w", err)
 	}
