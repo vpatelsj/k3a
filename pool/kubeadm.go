@@ -2,6 +2,7 @@ package pool
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net"
 	"os"
@@ -513,6 +514,70 @@ func (k *KubeadmInstaller) getSecretFromKeyVault(ctx context.Context, secretName
 	return *resp.Value, nil
 }
 
+// uploadEtcdCertificates uploads the dovetail etcd certificates to the VM
+func (k *KubeadmInstaller) uploadEtcdCertificates() error {
+	fmt.Println("Uploading etcd TLS certificates (dovetail)...")
+
+	// Create the certificate directory
+	certDir := "/home/azureuser/dovetail/cert"
+	commands := []string{
+		fmt.Sprintf("mkdir -p %s", certDir),
+		fmt.Sprintf("chmod 755 %s", filepath.Dir(certDir)),
+		fmt.Sprintf("chmod 755 %s", certDir),
+	}
+
+	for _, cmd := range commands {
+		if _, err := k.executeCommand(cmd); err != nil {
+			return fmt.Errorf("failed to create certificate directory: %w", err)
+		}
+	}
+
+	// Read local certificate files
+	caCertPath := "dovetail-ca.crt"
+	clientCertPath := "dovetail-client.crt"
+	clientKeyPath := "dovetail-client.key"
+
+	caCert, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return fmt.Errorf("failed to read CA certificate from %s: %w", caCertPath, err)
+	}
+
+	clientCert, err := os.ReadFile(clientCertPath)
+	if err != nil {
+		return fmt.Errorf("failed to read client certificate from %s: %w", clientCertPath, err)
+	}
+
+	clientKey, err := os.ReadFile(clientKeyPath)
+	if err != nil {
+		return fmt.Errorf("failed to read client key from %s: %w", clientKeyPath, err)
+	}
+
+	// Upload certificates using cat and heredoc to avoid SCP complexity
+	uploadCommands := []struct {
+		content  []byte
+		destPath string
+		mode     string
+	}{
+		{caCert, filepath.Join(certDir, "ca.crt"), "644"},
+		{clientCert, filepath.Join(certDir, "client.crt"), "644"},
+		{clientKey, filepath.Join(certDir, "client.key"), "600"},
+	}
+
+	for _, upload := range uploadCommands {
+		// Use base64 encoding to safely transfer the file content
+		encoded := base64.StdEncoding.EncodeToString(upload.content)
+		uploadCmd := fmt.Sprintf("echo '%s' | base64 -d > %s && chmod %s %s",
+			encoded, upload.destPath, upload.mode, upload.destPath)
+
+		if _, err := k.executeCommand(uploadCmd); err != nil {
+			return fmt.Errorf("failed to upload certificate to %s: %w", upload.destPath, err)
+		}
+	}
+
+	fmt.Println("Etcd TLS certificates uploaded successfully")
+	return nil
+}
+
 // InstallAsFirstMaster installs kubeadm and bootstraps the first master node
 func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	fmt.Println("=== BOOTSTRAPPING FIRST MASTER NODE ===")
@@ -565,6 +630,11 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	fmt.Println("Ensuring clean state by removing any existing tokens...")
 	if err := k.cleanupStaleTokens(ctx); err != nil {
 		return err
+	}
+
+	// Upload etcd TLS certificates before initializing the cluster
+	if err := k.uploadEtcdCertificates(); err != nil {
+		return fmt.Errorf("failed to upload etcd certificates: %w", err)
 	}
 
 	// Get internal IP address
@@ -639,7 +709,10 @@ controllerManager:
 etcd:
   external:
     endpoints:
-    - "http://4.206.93.140:2379"
+    - "https://4.206.93.140:2379"
+    caFile: "/home/azureuser/dovetail/cert/ca.crt"
+    certFile: "/home/azureuser/dovetail/cert/client.crt"
+    keyFile: "/home/azureuser/dovetail/cert/client.key"
 ---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
@@ -1056,6 +1129,11 @@ func (k *KubeadmInstaller) InstallAsAdditionalMaster(ctx context.Context) error 
 		return err
 	}
 
+	// Upload etcd TLS certificates before joining the cluster
+	if err := k.uploadEtcdCertificates(); err != nil {
+		return fmt.Errorf("failed to upload etcd certificates: %w", err)
+	}
+
 	// Setup DNS resolution for cluster endpoint (needed for kubeadm-config ConfigMap access)
 	if err := k.setupDNSResolution(); err != nil {
 		return fmt.Errorf("failed to setup DNS resolution: %w", err)
@@ -1277,7 +1355,10 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 			newLines = append(newLines, "etcd:")
 			newLines = append(newLines, "  external:")
 			newLines = append(newLines, "    endpoints:")
-			newLines = append(newLines, "    - http://4.206.93.140:2379")
+			newLines = append(newLines, "    - https://4.206.93.140:2379")
+			newLines = append(newLines, "    caFile: /home/azureuser/dovetail/cert/ca.crt")
+			newLines = append(newLines, "    certFile: /home/azureuser/dovetail/cert/client.crt")
+			newLines = append(newLines, "    keyFile: /home/azureuser/dovetail/cert/client.key")
 			added = true
 		}
 	}
@@ -1289,7 +1370,10 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 			"etcd:",
 			"  external:",
 			"    endpoints:",
-			"    - http://4.206.93.140:2379",
+			"    - https://4.206.93.140:2379",
+			"    caFile: /home/azureuser/dovetail/cert/ca.crt",
+			"    certFile: /home/azureuser/dovetail/cert/client.crt",
+			"    keyFile: /home/azureuser/dovetail/cert/client.key",
 		}
 		newLines = append(newLines, lines...)
 	}
