@@ -748,7 +748,24 @@ func addEtcdNSGRules(ctx context.Context, args CreatePoolArgs, lbName string, cr
 
 	fmt.Printf("Found etcd NSG: %s, adding rule for cluster outbound IPs...\n", etcdNSGName)
 
-	// Add NSG rule allowing cluster outbound IPs to etcd port 2379
+	// Extract unique ports from etcd endpoints
+	portSet := map[string]bool{}
+	for _, ep := range args.EtcdEndpoints {
+		// ep is like "http://10.0.0.1:3379"
+		parts := strings.Split(ep, ":")
+		if len(parts) >= 3 {
+			portSet[parts[len(parts)-1]] = true
+		}
+	}
+	var etcdPorts []string
+	for p := range portSet {
+		etcdPorts = append(etcdPorts, p)
+	}
+	if len(etcdPorts) == 0 {
+		etcdPorts = []string{"2379"}
+	}
+
+	// Add NSG rule allowing cluster outbound IPs to etcd ports
 	securityRulesClient, err := armnetwork.NewSecurityRulesClient(etcdSubscription, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create security rules client: %w", err)
@@ -758,6 +775,11 @@ func addEtcdNSGRules(ctx context.Context, args CreatePoolArgs, lbName string, cr
 	sourceAddresses := make([]*string, len(outboundIPs))
 	for i, ip := range outboundIPs {
 		sourceAddresses[i] = &ip
+	}
+
+	destPorts := make([]*string, len(etcdPorts))
+	for i, p := range etcdPorts {
+		destPorts[i] = &p
 	}
 
 	rule := armnetwork.SecurityRule{
@@ -770,8 +792,12 @@ func addEtcdNSGRules(ctx context.Context, args CreatePoolArgs, lbName string, cr
 			SourceAddressPrefixes:    sourceAddresses,
 			SourcePortRange:          to.Ptr("*"),
 			DestinationAddressPrefix: to.Ptr("*"),
-			DestinationPortRange:     to.Ptr("2379"),
+			DestinationPortRanges:    destPorts,
 		},
+	}
+	if len(etcdPorts) == 1 {
+		rule.Properties.DestinationPortRange = to.Ptr(etcdPorts[0])
+		rule.Properties.DestinationPortRanges = nil
 	}
 
 	poller, err := securityRulesClient.BeginCreateOrUpdate(ctx, args.EtcdResourceGroup, etcdNSGName, ruleName, rule, nil)
