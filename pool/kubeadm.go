@@ -1071,6 +1071,7 @@ spec:
 	dnsEndpoint := fmt.Sprintf("%s:6443", dnsName)
 	internalEndpoint := fmt.Sprintf("%s:6443", internalIP)
 	workerJoinForCluster := strings.ReplaceAll(workerJoin, dnsEndpoint, internalEndpoint)
+	workerJoinForCluster = fmt.Sprintf("%s --ignore-preflight-errors=all", workerJoinForCluster)
 
 	if err := k.storeSecretInKeyVault(ctx, fmt.Sprintf("%s-worker-join", k.cluster), workerJoinForCluster); err != nil {
 		return err
