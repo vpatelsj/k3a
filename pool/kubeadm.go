@@ -713,6 +713,7 @@ profiles:
 	}
 
 	stage2Phases := []string{
+		"upload-config all",
 		"bootstrap-token",
 		"mark-control-plane",
 		"kubelet-finalize all",
@@ -735,13 +736,6 @@ profiles:
 
 	if phaseErr != nil {
 		return phaseErr
-	}
-
-	// Upload the kubeadm ClusterConfiguration ConfigMap manually since upload-config was skipped
-	fmt.Println("Uploading kubeadm ClusterConfiguration ConfigMap...")
-	uploadConfigCmd := "sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/kubeadm-config.yaml -n kube-system --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl apply --validate=false -f -"
-	if _, err := k.executeCommand(uploadConfigCmd); err != nil {
-		return fmt.Errorf("failed to upload kubeadm ClusterConfiguration: %w", err)
 	}
 
 	// Clean up config file
