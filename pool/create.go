@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"os"
+	"strings"
 	"text/template"
 	"time"
 
@@ -31,6 +32,7 @@ type CreatePoolArgs struct {
 	SKU            string   // VM SKU type
 	OSDiskSizeGB   int      // OS disk size in GB
 	MSIIDs         []string // Additional user-assigned MSI resource IDs
+	EtcdEndpoints  []string // External etcd endpoints (e.g. http://10.0.0.1:2379)
 }
 
 //go:embed cloud-init.yaml
@@ -229,7 +231,7 @@ func determineNodeType(ctx context.Context, role string, subscriptionID, cluster
 }
 
 // installKubeadmOnInstances installs kubeadm on all instances in a VMSS
-func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vmssName, role string, expectedCount int, cred *azidentity.DefaultAzureCredential) error {
+func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vmssName, role string, expectedCount int, etcdEndpoints []string, k8sVersion string, cred *azidentity.DefaultAzureCredential) error {
 	fmt.Printf("Installing kubeadm on VMSS: %s (role: %s)\n", vmssName, role)
 
 	// Create VMSS manager to get instance information
@@ -299,6 +301,8 @@ func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vms
 
 		// Create kubeadm installer
 		installer := NewKubeadmInstaller(subscriptionID, cluster, keyVaultName, sshClient, cred)
+		installer.etcdEndpoints = etcdEndpoints
+		installer.k8sVersion = k8sVersion
 
 		// Install based on node type
 		switch nodeType {
@@ -347,6 +351,8 @@ func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vms
 
 			// Create kubeadm installer
 			installer := NewKubeadmInstaller(subscriptionID, cluster, keyVaultName, sshClient, cred)
+			installer.etcdEndpoints = etcdEndpoints
+			installer.k8sVersion = k8sVersion
 
 			if err := installer.InstallAsAdditionalMaster(ctx); err != nil {
 				return fmt.Errorf("failed to install additional master on %s: %w", instance.Name, err)
@@ -437,13 +443,21 @@ func Create(args CreatePoolArgs) error {
 
 	keyVaultName := fmt.Sprintf("k3akv%s", clusterHash)
 	storageAccountName := fmt.Sprintf("k3astorage%s", clusterHash)
+
+	// Derive minor version (e.g. "v1.35" from "v1.35.2") for package repo URL
+	k8sMinorVersion := args.K8sVersion
+	if parts := strings.SplitN(args.K8sVersion, ".", 3); len(parts) >= 2 {
+		k8sMinorVersion = parts[0] + "." + parts[1]
+	}
+
 	tmplData := map[string]string{
 		"KeyVaultName":       keyVaultName,
 		"Role":               role,
 		"StorageAccountName": storageAccountName,
 		"ResourceGroup":      cluster,
 		"ExternalIP":         externalIP,
-		"K8sVersion":         args.K8sVersion, // Pass version to template
+		"K8sVersion":         args.K8sVersion,
+		"K8sMinorVersion":    k8sMinorVersion,
 		"MSIClientID":        *msi.Properties.ClientID,
 	}
 
@@ -582,7 +596,7 @@ func Create(args CreatePoolArgs) error {
 	fmt.Printf("VMSS deployment succeeded: %v\n", *resp.ID)
 
 	// Install kubeadm on the newly created instances
-	if err := installKubeadmOnInstances(ctx, subscriptionID, cluster, args.Name+"-vmss", args.Role, args.InstanceCount, cred); err != nil {
+	if err := installKubeadmOnInstances(ctx, subscriptionID, cluster, args.Name+"-vmss", args.Role, args.InstanceCount, args.EtcdEndpoints, args.K8sVersion, cred); err != nil {
 		return fmt.Errorf("kubeadm installation failed: %w", err)
 	}
 

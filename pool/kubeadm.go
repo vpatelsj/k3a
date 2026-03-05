@@ -21,6 +21,8 @@ type KubeadmInstaller struct {
 	keyVaultName   string
 	sshClient      *ssh.Client
 	credential     *azidentity.DefaultAzureCredential
+	etcdEndpoints  []string // External etcd endpoints (e.g. http://10.0.0.1:2379)
+	k8sVersion     string   // Kubernetes version (e.g. v1.35.2)
 }
 
 // NewKubeadmInstaller creates a new kubeadm installer
@@ -600,9 +602,18 @@ func (k *KubeadmInstaller) InstallAsFirstMaster(ctx context.Context) error {
 	// Create kubeadm configuration file with external etcd
 	fmt.Println("Creating kubeadm configuration file...")
 
+	// Build etcd config section
+	etcdSection := ""
+	if len(k.etcdEndpoints) > 0 {
+		etcdSection = "etcd:\n  external:\n    endpoints:\n"
+		for _, ep := range k.etcdEndpoints {
+			etcdSection += fmt.Sprintf("    - \"%s\"\n", ep)
+		}
+	}
+
 	kubeadmConfig := fmt.Sprintf(`apiVersion: kubeadm.k8s.io/v1beta4
 kind: ClusterConfiguration
-kubernetesVersion: v1.33.1
+kubernetesVersion: %s
 controlPlaneEndpoint: "%s"
 networking:
   podSubnet: "16.0.0.0/5"
@@ -636,11 +647,7 @@ controllerManager:
     value: "10m"
   - name: concurrent-job-syncs
     value: "100"
-etcd:
-  external:
-    endpoints:
-    - "http://4.206.93.140:2379"
----
+%s---
 apiVersion: kubeadm.k8s.io/v1beta4
 kind: InitConfiguration
 localAPIEndpoint:
@@ -650,6 +657,7 @@ localAPIEndpoint:
 apiVersion: kubelet.config.k8s.io/v1beta1
 kind: KubeletConfiguration
 maxPods: 300
+failCgroupV1: false
 ---
 apiVersion: kubescheduler.config.k8s.io/v1beta3
 kind: KubeSchedulerConfiguration
@@ -660,7 +668,7 @@ clientConnection:
 percentageOfNodesToScore: 1
 profiles:
   - schedulerName: default-scheduler
-`, controlPlaneEndpoint, internalIP, dnsName, internalIP)
+`, k.k8sVersion, controlPlaneEndpoint, internalIP, dnsName, etcdSection, internalIP)
 
 	// Write kubeadm config to temporary file
 	configCmd := fmt.Sprintf("cat > /tmp/kubeadm-config.yaml << 'EOF'\n%s\nEOF", kubeadmConfig)
@@ -669,24 +677,69 @@ profiles:
 		return fmt.Errorf("failed to create kubeadm config file: %w", err)
 	}
 
-	// Initialize Kubernetes cluster using config file
-	// containerd already configured with correct pause image via cloud-init
-	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --upload-certs --skip-phases=upload-config --ignore-preflight-errors=all"
+	// Run kubeadm init in two stages to handle RBAC timing with external etcd.
+	// Stage 1: kubeadm init with RBAC-sensitive phases skipped. This runs certs,
+	// kubeconfig, kubelet-start, control-plane, wait-control-plane, etc.
+	initCommand := "sudo kubeadm init --config=/tmp/kubeadm-config.yaml --skip-phases=upload-config,upload-certs,mark-control-plane,bootstrap-token,kubelet-finalize,addon,show-join-command --ignore-preflight-errors=all"
 	_, err = k.executeCommand(initCommand)
 	if err != nil {
 		return fmt.Errorf("failed to initialize Kubernetes cluster: %w", err)
 	}
 
-	// Ensure kubernetes-admin has cluster-admin privileges before uploading config
-	fmt.Println("Ensuring kubernetes-admin has cluster-admin privileges...")
-	clusterRoleBindingCmd := "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl create clusterrolebinding kubeadm:cluster-admin --clusterrole=cluster-admin --user=kubernetes-admin --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply --validate=false -f -"
-	if _, err := k.executeCommand(clusterRoleBindingCmd); err != nil {
-		return fmt.Errorf("failed to ensure cluster-admin binding: %w", err)
+	// Stage 2: Run RBAC-sensitive phases with super-admin.conf (system:masters).
+	// In k8s 1.29+, admin.conf uses kubeadm:cluster-admins group instead of
+	// system:masters. The binding for that group is created by bootstrap-token phase,
+	// so we need super-admin.conf until that phase runs.
+	fmt.Println("Using super-admin credentials for RBAC-sensitive phases...")
+	k.executeCommand("sudo cp /etc/kubernetes/admin.conf /etc/kubernetes/admin.conf.bak")
+	k.executeCommand("sudo cp /etc/kubernetes/super-admin.conf /etc/kubernetes/admin.conf")
+
+	// Wait for the node to register before running mark-control-plane
+	fmt.Println("Waiting for node to register...")
+	for i := 0; i < 60; i++ {
+		out, err := k.executeCommand("sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl get nodes --no-headers 2>/dev/null | wc -l")
+		if err == nil && strings.TrimSpace(out) != "0" {
+			fmt.Println("Node registered")
+			break
+		}
+		if i == 59 {
+			// Restore admin.conf before returning error
+			k.executeCommand("sudo cp /etc/kubernetes/admin.conf.bak /etc/kubernetes/admin.conf")
+			k.executeCommand("sudo rm -f /etc/kubernetes/admin.conf.bak")
+			return fmt.Errorf("timed out waiting for node registration")
+		}
+		fmt.Printf("Node not yet registered, waiting... (%d/60)\n", i+1)
+		time.Sleep(5 * time.Second)
 	}
 
-	// Upload the kubeadm ClusterConfiguration ConfigMap manually since the phase was skipped
+	stage2Phases := []string{
+		"bootstrap-token",
+		"mark-control-plane",
+		"kubelet-finalize all",
+		"addon all",
+	}
+	var phaseErr error
+	for _, phase := range stage2Phases {
+		fmt.Printf("Running phase: %s\n", phase)
+		phaseCmd := fmt.Sprintf("sudo kubeadm init phase %s --config=/tmp/kubeadm-config.yaml", phase)
+		if _, err := k.executeCommand(phaseCmd); err != nil {
+			phaseErr = fmt.Errorf("failed to run kubeadm phase %s: %w", phase, err)
+			break
+		}
+	}
+
+	// Restore original admin.conf
+	fmt.Println("Restoring admin.conf...")
+	k.executeCommand("sudo cp /etc/kubernetes/admin.conf.bak /etc/kubernetes/admin.conf")
+	k.executeCommand("sudo rm -f /etc/kubernetes/admin.conf.bak")
+
+	if phaseErr != nil {
+		return phaseErr
+	}
+
+	// Upload the kubeadm ClusterConfiguration ConfigMap manually since upload-config was skipped
 	fmt.Println("Uploading kubeadm ClusterConfiguration ConfigMap...")
-	uploadConfigCmd := "sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/kubeadm-config.yaml -n kube-system --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/admin.conf kubectl apply --validate=false -f -"
+	uploadConfigCmd := "sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/kubeadm-config.yaml -n kube-system --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl apply --validate=false -f -"
 	if _, err := k.executeCommand(uploadConfigCmd); err != nil {
 		return fmt.Errorf("failed to upload kubeadm ClusterConfiguration: %w", err)
 	}
@@ -963,14 +1016,14 @@ spec:
 
 	// Install Flannel CNI plugin with custom configuration
 	fmt.Println("Installing Flannel CNI plugin...")
-	_, err = k.executeCommand("kubectl apply -f /tmp/kube-flannel-custom.yml")
+	_, err = k.executeCommand("sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl apply -f /tmp/kube-flannel-custom.yml")
 	if err != nil {
 		return fmt.Errorf("failed to install Flannel CNI: %w", err)
 	}
 
 	// Install local path provisioner for persistent storage
 	fmt.Println("Installing local path provisioner...")
-	_, err = k.executeCommand("kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.28/deploy/local-path-storage.yaml")
+	_, err = k.executeCommand("sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl apply -f https://raw.githubusercontent.com/rancher/local-path-provisioner/v0.0.28/deploy/local-path-storage.yaml")
 	if err != nil {
 		return fmt.Errorf("failed to install local path provisioner: %w", err)
 	}
@@ -980,7 +1033,7 @@ spec:
 
 	// Update kube-proxy DaemonSet to exclude hollow nodes
 	kubeProxyPatch := `{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/os","operator":"In","values":["linux"]},{"key":"kubemark","operator":"NotIn","values":["true"]}]}]}}}}}}}`
-	_, err = k.executeCommand(fmt.Sprintf("kubectl patch ds kube-proxy -n kube-system --type='strategic' -p='%s'", kubeProxyPatch))
+	_, err = k.executeCommand(fmt.Sprintf("sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl patch ds kube-proxy -n kube-system --type='strategic' -p='%s'", kubeProxyPatch))
 	if err != nil {
 		fmt.Printf("Warning: failed to patch kube-proxy DaemonSet (may not exist yet): %v\n", err)
 	}
@@ -988,7 +1041,7 @@ spec:
 	// Update flannel DaemonSet to exclude hollow nodes (wait a bit for flannel to be ready)
 	time.Sleep(30 * time.Second)
 	flannelPatch := `{"spec":{"template":{"spec":{"affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"kubernetes.io/os","operator":"In","values":["linux"]},{"key":"kubemark","operator":"NotIn","values":["true"]}]}]}}}}}}}`
-	_, err = k.executeCommand(fmt.Sprintf("kubectl patch ds kube-flannel-ds -n kube-flannel --type='strategic' -p='%s'", flannelPatch))
+	_, err = k.executeCommand(fmt.Sprintf("sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl patch ds kube-flannel-ds -n kube-flannel --type='strategic' -p='%s'", flannelPatch))
 	if err != nil {
 		fmt.Printf("Warning: failed to patch flannel DaemonSet (may not exist yet): %v\n", err)
 	}
@@ -1007,7 +1060,7 @@ spec:
 	fmt.Println("Generating and storing join tokens...")
 
 	// Worker join command
-	workerJoinOutput, err := k.executeCommand("sudo kubeadm token create --print-join-command 2>/dev/null")
+	workerJoinOutput, err := k.executeCommand("sudo kubeadm token create --print-join-command --kubeconfig /etc/kubernetes/super-admin.conf 2>/dev/null")
 	if err != nil {
 		return fmt.Errorf("failed to generate worker join token: %w", err)
 	}
@@ -1024,7 +1077,7 @@ spec:
 	}
 
 	// Master join command will include certificate key after upload-certs
-	certKeyOutput, err := k.executeCommand("sudo kubeadm init phase upload-certs --upload-certs 2>/dev/null | tail -1")
+	certKeyOutput, err := k.executeCommand("sudo kubeadm init phase upload-certs --upload-certs --kubeconfig /etc/kubernetes/super-admin.conf 2>/dev/null | tail -1")
 	if err != nil {
 		return fmt.Errorf("failed to generate certificate key: %w", err)
 	}
@@ -1256,7 +1309,7 @@ func CreateSSHClient(host, username, privateKeyPath string) (*ssh.Client, error)
 // patchKubeadmConfigForMultiMaster patches the kubeadm-config ConfigMap to add controlPlaneEndpoint
 func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint string) error {
 	// Get current kubeadm-config ConfigMap
-	getConfigCmd := "kubectl get configmap kubeadm-config -n kube-system -o yaml"
+	getConfigCmd := "sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl get configmap kubeadm-config -n kube-system -o yaml"
 	currentConfig, err := k.executeCommand(getConfigCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get kubeadm-config ConfigMap: %w", err)
@@ -1271,7 +1324,7 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 	fmt.Printf("Adding controlPlaneEndpoint %s and external etcd configuration to kubeadm-config ConfigMap...\n", controlPlaneEndpoint)
 
 	// Get the current ClusterConfiguration data
-	getClusterConfigCmd := "kubectl get configmap kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}'"
+	getClusterConfigCmd := "sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl get configmap kubeadm-config -n kube-system -o jsonpath='{.data.ClusterConfiguration}'"
 	clusterConfig, err := k.executeCommand(getClusterConfigCmd)
 	if err != nil {
 		return fmt.Errorf("failed to get ClusterConfiguration: %w", err)
@@ -1318,7 +1371,7 @@ func (k *KubeadmInstaller) patchKubeadmConfigForMultiMaster(controlPlaneEndpoint
 	}
 
 	// Update the ConfigMap with the new configuration
-	patchCmd := "kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/cluster-config.yaml -n kube-system --dry-run=client -o yaml | kubectl apply -f -"
+	patchCmd := "sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl create configmap kubeadm-config --from-file=ClusterConfiguration=/tmp/cluster-config.yaml -n kube-system --dry-run=client -o yaml | sudo KUBECONFIG=/etc/kubernetes/super-admin.conf kubectl apply -f -"
 	_, err = k.executeCommand(patchCmd)
 	if err != nil {
 		return fmt.Errorf("failed to update kubeadm-config ConfigMap: %w", err)

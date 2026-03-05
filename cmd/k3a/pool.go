@@ -58,6 +58,9 @@ var createPoolCmd = &cobra.Command{
 		// Accept one or more MSI resource IDs
 		msiIDs, _ := cmd.Flags().GetStringArray("msi")
 
+		// Accept external etcd endpoints
+		etcdEndpoints, _ := cmd.Flags().GetStringArray("etcd-endpoints")
+
 		// Add spinner for pool creation
 		stopSpinner := spinner.Spinner("Creating VMSS pool...")
 		defer stopSpinner()
@@ -74,6 +77,7 @@ var createPoolCmd = &cobra.Command{
 			SKU:            sku,
 			OSDiskSizeGB:   osDiskSize,
 			MSIIDs:         msiIDs,
+			EtcdEndpoints:  etcdEndpoints,
 		})
 	},
 }
@@ -165,12 +169,15 @@ var kubeadmInstallCmd = &cobra.Command{
 		stopSpinner := spinner.Spinner("Installing kubeadm on VMSS pool...")
 		defer stopSpinner()
 
+		etcdEndpoints, _ := cmd.Flags().GetStringArray("etcd-endpoints")
+
 		return pool.KubeadmInstall(pool.KubeadmInstallArgs{
 			SubscriptionID: subscriptionID,
 			Cluster:        cluster,
 			Name:           name,
 			Role:           role,
 			K8sVersion:     k8sVersion,
+			EtcdEndpoints:  etcdEndpoints,
 		})
 	},
 }
@@ -190,10 +197,11 @@ func init() {
 	createPoolCmd.Flags().String("region", "canadacentral", "Azure region for the pool")
 	createPoolCmd.Flags().Int("instance-count", 1, "Number of VMSS instances")
 	createPoolCmd.Flags().String("ssh-key", os.ExpandEnv("$HOME/.ssh/id_rsa.pub"), "Path to the SSH public key file")
-	createPoolCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes version (e.g. v1.33.1)")
+	createPoolCmd.Flags().String("k8s-version", "v1.35.2", "Kubernetes version (e.g. v1.35.2)")
 	createPoolCmd.Flags().String("sku", "Standard_D2s_v3", "VM SKU type (default: Standard_D2s_v3)")
 	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
+	createPoolCmd.Flags().StringArray("etcd-endpoints", nil, "External etcd endpoints (e.g. --etcd-endpoints http://10.0.0.1:2379). Can be specified multiple times.")
 
 	_ = createPoolCmd.MarkFlagRequired("name")
 	_ = createPoolCmd.MarkFlagRequired("role")
@@ -214,7 +222,8 @@ func init() {
 	kubeadmInstallCmd.Flags().String("cluster", clusterDefault, "Cluster name (or set K3A_CLUSTER) (required)")
 	kubeadmInstallCmd.Flags().String("name", "", "Name of the node pool (required)")
 	kubeadmInstallCmd.Flags().String("role", "", "Role of the node pool (control-plane or worker) (required)")
-	kubeadmInstallCmd.Flags().String("k8s-version", "v1.33.1", "Kubernetes version (e.g. v1.33.1)")
+	kubeadmInstallCmd.Flags().String("k8s-version", "v1.35.2", "Kubernetes version (e.g. v1.35.2)")
+	kubeadmInstallCmd.Flags().StringArray("etcd-endpoints", nil, "External etcd endpoints (e.g. --etcd-endpoints http://10.0.0.1:2379). Can be specified multiple times.")
 	_ = kubeadmInstallCmd.MarkFlagRequired("name")
 	_ = kubeadmInstallCmd.MarkFlagRequired("role")
 

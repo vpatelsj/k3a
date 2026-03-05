@@ -14,6 +14,7 @@ type KubeadmInstallArgs struct {
 	Name           string
 	Role           string
 	K8sVersion     string
+	EtcdEndpoints  []string
 }
 
 func KubeadmInstall(args KubeadmInstallArgs) error {
@@ -97,6 +98,8 @@ func KubeadmInstall(args KubeadmInstallArgs) error {
 
 		// Create kubeadm installer
 		installer := NewKubeadmInstaller(args.SubscriptionID, args.Cluster, keyVaultName, sshClient, cred)
+		installer.etcdEndpoints = args.EtcdEndpoints
+		installer.k8sVersion = args.K8sVersion
 
 		// Install based on node type
 		switch nodeType {
@@ -145,6 +148,7 @@ func KubeadmInstall(args KubeadmInstallArgs) error {
 
 			// Create kubeadm installer
 			installer := NewKubeadmInstaller(args.SubscriptionID, args.Cluster, keyVaultName, sshClient, cred)
+			installer.etcdEndpoints = args.EtcdEndpoints
 
 			if err := installer.InstallAsAdditionalMaster(ctx); err != nil {
 				return fmt.Errorf("failed to install additional master on %s: %w", instance.Name, err)
