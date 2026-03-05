@@ -61,23 +61,29 @@ var createPoolCmd = &cobra.Command{
 		// Accept external etcd endpoints
 		etcdEndpoints, _ := cmd.Flags().GetStringArray("etcd-endpoints")
 
+		// Accept etcd resource group and subscription for NSG automation
+		etcdRG, _ := cmd.Flags().GetString("etcd-rg")
+		etcdSubscription, _ := cmd.Flags().GetString("etcd-subscription")
+
 		// Add spinner for pool creation
 		stopSpinner := spinner.Spinner("Creating VMSS pool...")
 		defer stopSpinner()
 
 		return pool.Create(pool.CreatePoolArgs{
-			SubscriptionID: subscriptionID,
-			Cluster:        cluster,
-			Location:       location,
-			Role:           role,
-			Name:           name,
-			SSHKeyPath:     sshKeyPath,
-			InstanceCount:  instanceCount,
-			K8sVersion:     k8sVersion,
-			SKU:            sku,
-			OSDiskSizeGB:   osDiskSize,
-			MSIIDs:         msiIDs,
-			EtcdEndpoints:  etcdEndpoints,
+			SubscriptionID:    subscriptionID,
+			Cluster:           cluster,
+			Location:          location,
+			Role:              role,
+			Name:              name,
+			SSHKeyPath:        sshKeyPath,
+			InstanceCount:     instanceCount,
+			K8sVersion:        k8sVersion,
+			SKU:               sku,
+			OSDiskSizeGB:      osDiskSize,
+			MSIIDs:            msiIDs,
+			EtcdEndpoints:     etcdEndpoints,
+			EtcdResourceGroup: etcdRG,
+			EtcdSubscription:  etcdSubscription,
 		})
 	},
 }
@@ -202,6 +208,8 @@ func init() {
 	createPoolCmd.Flags().Int("os-disk-size", 30, "OS disk size in GB (default: 30)")
 	createPoolCmd.Flags().StringArray("msi", nil, "Additional user-assigned MSI resource IDs to add to the VMSS (can be specified multiple times)")
 	createPoolCmd.Flags().StringArray("etcd-endpoints", nil, "External etcd endpoints (e.g. --etcd-endpoints http://10.0.0.1:2379). Can be specified multiple times.")
+	createPoolCmd.Flags().String("etcd-rg", "", "Resource group of the external etcd cluster (for auto-adding NSG rules)")
+	createPoolCmd.Flags().String("etcd-subscription", "", "Subscription of the external etcd cluster (defaults to pool subscription)")
 
 	_ = createPoolCmd.MarkFlagRequired("name")
 	_ = createPoolCmd.MarkFlagRequired("role")

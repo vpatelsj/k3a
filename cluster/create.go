@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -435,7 +436,55 @@ func createNetworkSecurityGroup(ctx context.Context, subscriptionID, resourceGro
 	}
 
 	fmt.Println("CorpNetPublic NSG rule added successfully")
+
+	// Auto-detect caller's public IP and add AllowCallerIP rule
+	callerIP, err := getCallerPublicIP()
+	if err != nil {
+		fmt.Printf("Warning: could not detect caller IP, skipping AllowCallerIP rule: %v\n", err)
+	} else {
+		fmt.Printf("Detected caller IP: %s, adding AllowCallerIP NSG rule...\n", callerIP)
+		callerRule := armnetwork.SecurityRule{
+			Name: to.Ptr("AllowCallerIP"),
+			Properties: &armnetwork.SecurityRulePropertiesFormat{
+				Priority:                 to.Ptr[int32](200),
+				Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
+				Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
+				Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolAsterisk),
+				SourceAddressPrefix:      to.Ptr(callerIP),
+				SourcePortRange:          to.Ptr("*"),
+				DestinationAddressPrefix: to.Ptr("*"),
+				DestinationPortRange:     to.Ptr("*"),
+			},
+		}
+		_, err = securityRulesClient.BeginCreateOrUpdate(ctx, resourceGroup, nsgName, "AllowCallerIP", callerRule, nil)
+		if err != nil {
+			fmt.Printf("Warning: failed to add AllowCallerIP NSG rule: %v\n", err)
+		} else {
+			fmt.Println("AllowCallerIP NSG rule added successfully")
+		}
+	}
+
 	return *finalResp.SecurityGroup.ID, nil
+}
+
+// getCallerPublicIP detects the caller's public IP address
+func getCallerPublicIP() (string, error) {
+	resp, err := http.Get("https://api.ipify.org")
+	if err != nil {
+		return "", fmt.Errorf("failed to query ipify: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", fmt.Errorf("failed to read response: %w", err)
+	}
+
+	ip := strings.TrimSpace(string(body))
+	if ip == "" {
+		return "", fmt.Errorf("empty IP returned")
+	}
+	return ip, nil
 }
 
 // createVirtualNetwork creates a Virtual Network with subnets and attaches the NSG

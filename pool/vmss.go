@@ -350,3 +350,52 @@ func (vm *VMSSManager) GetLoadBalancerPublicIP(ctx context.Context, lbName strin
 
 	return "", fmt.Errorf("no public IP address found for load balancer")
 }
+
+// GetAllLoadBalancerPublicIPs gets all public IPs (primary + outbound) associated with the load balancer
+func (vm *VMSSManager) GetAllLoadBalancerPublicIPs(ctx context.Context, lbName string) ([]string, error) {
+	lbClient, err := armnetwork.NewLoadBalancersClient(vm.subscriptionID, vm.credential, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create load balancer client: %w", err)
+	}
+
+	lb, err := lbClient.Get(ctx, vm.cluster, lbName, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get load balancer: %w", err)
+	}
+
+	if lb.Properties == nil || lb.Properties.FrontendIPConfigurations == nil {
+		return nil, fmt.Errorf("no frontend IP configurations found")
+	}
+
+	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(vm.subscriptionID, vm.credential, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create public IP client: %w", err)
+	}
+
+	var ips []string
+	for _, frontendIP := range lb.Properties.FrontendIPConfigurations {
+		if frontendIP.Properties == nil || frontendIP.Properties.PublicIPAddress == nil || frontendIP.Properties.PublicIPAddress.ID == nil {
+			continue
+		}
+
+		parts := strings.Split(*frontendIP.Properties.PublicIPAddress.ID, "/")
+		if len(parts) == 0 {
+			continue
+		}
+		publicIPName := parts[len(parts)-1]
+
+		publicIP, err := publicIPClient.Get(ctx, vm.cluster, publicIPName, nil)
+		if err != nil {
+			continue
+		}
+
+		if publicIP.Properties != nil && publicIP.Properties.IPAddress != nil {
+			ips = append(ips, *publicIP.Properties.IPAddress)
+		}
+	}
+
+	if len(ips) == 0 {
+		return nil, fmt.Errorf("no public IPs found for load balancer")
+	}
+	return ips, nil
+}

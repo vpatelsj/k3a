@@ -21,18 +21,20 @@ import (
 )
 
 type CreatePoolArgs struct {
-	SubscriptionID string
-	Cluster        string
-	Location       string
-	Role           string
-	Name           string
-	SSHKeyPath     string
-	InstanceCount  int
-	K8sVersion     string   // New field for Kubernetes version
-	SKU            string   // VM SKU type
-	OSDiskSizeGB   int      // OS disk size in GB
-	MSIIDs         []string // Additional user-assigned MSI resource IDs
-	EtcdEndpoints  []string // External etcd endpoints (e.g. http://10.0.0.1:2379)
+	SubscriptionID    string
+	Cluster           string
+	Location          string
+	Role              string
+	Name              string
+	SSHKeyPath        string
+	InstanceCount     int
+	K8sVersion        string   // New field for Kubernetes version
+	SKU               string   // VM SKU type
+	OSDiskSizeGB      int      // OS disk size in GB
+	MSIIDs            []string // Additional user-assigned MSI resource IDs
+	EtcdEndpoints     []string // External etcd endpoints (e.g. http://10.0.0.1:2379)
+	EtcdResourceGroup string   // Resource group of the external etcd cluster (for NSG rule automation)
+	EtcdSubscription  string   // Subscription of the external etcd cluster (defaults to pool subscription)
 }
 
 //go:embed cloud-init.yaml
@@ -366,6 +368,81 @@ func installKubeadmOnInstances(ctx context.Context, subscriptionID, cluster, vms
 	return nil
 }
 
+// discoverEtcdEndpoints discovers etcd endpoints by finding VMs in the etcd resource group
+// and constructing http://<publicIP>:2379 endpoints from their public IPs
+func discoverEtcdEndpoints(ctx context.Context, etcdSubscription, etcdResourceGroup string, cred *azidentity.DefaultAzureCredential) ([]string, error) {
+	vmClient, err := armcompute.NewVirtualMachinesClient(etcdSubscription, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create VM client: %w", err)
+	}
+
+	publicIPClient, err := armnetwork.NewPublicIPAddressesClient(etcdSubscription, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create public IP client: %w", err)
+	}
+
+	nicClient, err := armnetwork.NewInterfacesClient(etcdSubscription, cred, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create NIC client: %w", err)
+	}
+
+	var endpoints []string
+	pager := vmClient.NewListPager(etcdResourceGroup, nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("failed to list VMs in etcd resource group: %w", err)
+		}
+		for _, vm := range page.Value {
+			if vm.Properties == nil || vm.Properties.NetworkProfile == nil {
+				continue
+			}
+			for _, nicRef := range vm.Properties.NetworkProfile.NetworkInterfaces {
+				if nicRef.ID == nil {
+					continue
+				}
+				// Extract NIC name from resource ID
+				parts := strings.Split(*nicRef.ID, "/")
+				if len(parts) == 0 {
+					continue
+				}
+				nicName := parts[len(parts)-1]
+
+				nic, err := nicClient.Get(ctx, etcdResourceGroup, nicName, nil)
+				if err != nil {
+					continue
+				}
+				if nic.Properties == nil {
+					continue
+				}
+				for _, ipConfig := range nic.Properties.IPConfigurations {
+					if ipConfig.Properties == nil || ipConfig.Properties.PublicIPAddress == nil || ipConfig.Properties.PublicIPAddress.ID == nil {
+						continue
+					}
+					pipParts := strings.Split(*ipConfig.Properties.PublicIPAddress.ID, "/")
+					if len(pipParts) == 0 {
+						continue
+					}
+					pipName := pipParts[len(pipParts)-1]
+
+					pip, err := publicIPClient.Get(ctx, etcdResourceGroup, pipName, nil)
+					if err != nil {
+						continue
+					}
+					if pip.Properties != nil && pip.Properties.IPAddress != nil {
+						endpoints = append(endpoints, fmt.Sprintf("http://%s:2379", *pip.Properties.IPAddress))
+					}
+				}
+			}
+		}
+	}
+
+	if len(endpoints) == 0 {
+		return nil, fmt.Errorf("no VMs with public IPs found in etcd resource group %s", etcdResourceGroup)
+	}
+	return endpoints, nil
+}
+
 func Create(args CreatePoolArgs) error {
 	subscriptionID := args.SubscriptionID
 	cluster := args.Cluster
@@ -380,6 +457,21 @@ func Create(args CreatePoolArgs) error {
 		return fmt.Errorf("failed to get credentials: %w", err)
 	}
 	ctx := context.Background()
+
+	// Auto-discover etcd endpoints from resource group if not explicitly provided
+	if len(args.EtcdEndpoints) == 0 && args.EtcdResourceGroup != "" {
+		etcdSub := args.EtcdSubscription
+		if etcdSub == "" {
+			etcdSub = subscriptionID
+		}
+		fmt.Printf("Discovering etcd endpoints from resource group %s...\n", args.EtcdResourceGroup)
+		discovered, err := discoverEtcdEndpoints(ctx, etcdSub, args.EtcdResourceGroup, cred)
+		if err != nil {
+			return fmt.Errorf("failed to discover etcd endpoints: %w", err)
+		}
+		args.EtcdEndpoints = discovered
+		fmt.Printf("Discovered etcd endpoints: %v\n", discovered)
+	}
 	vmssClient, err := armcompute.NewVirtualMachineScaleSetsClient(subscriptionID, cred, nil)
 	if err != nil {
 		return fmt.Errorf("failed to create VMSS client: %w", err)
@@ -595,10 +687,102 @@ func Create(args CreatePoolArgs) error {
 
 	fmt.Printf("VMSS deployment succeeded: %v\n", *resp.ID)
 
+	// If etcd resource group is specified, auto-add NSG rule on the etcd NSG for cluster outbound IPs
+	if args.EtcdResourceGroup != "" {
+		if err := addEtcdNSGRules(ctx, args, lbName, cred); err != nil {
+			fmt.Printf("Warning: failed to add etcd NSG rules: %v\n", err)
+		}
+	}
+
 	// Install kubeadm on the newly created instances
 	if err := installKubeadmOnInstances(ctx, subscriptionID, cluster, args.Name+"-vmss", args.Role, args.InstanceCount, args.EtcdEndpoints, args.K8sVersion, cred); err != nil {
 		return fmt.Errorf("kubeadm installation failed: %w", err)
 	}
 
+	return nil
+}
+
+// addEtcdNSGRules finds the NSG in the etcd resource group and adds an inbound rule
+// allowing the cluster's LB outbound IPs on port 2379 (etcd client port)
+func addEtcdNSGRules(ctx context.Context, args CreatePoolArgs, lbName string, cred *azidentity.DefaultAzureCredential) error {
+	etcdSubscription := args.EtcdSubscription
+	if etcdSubscription == "" {
+		etcdSubscription = args.SubscriptionID
+	}
+
+	// Get all LB outbound IPs
+	vmssManager := NewVMSSManager(args.SubscriptionID, args.Cluster, cred)
+	outboundIPs, err := vmssManager.GetAllLoadBalancerPublicIPs(ctx, lbName)
+	if err != nil {
+		return fmt.Errorf("failed to get LB outbound IPs: %w", err)
+	}
+	fmt.Printf("Found %d LB outbound IPs for etcd NSG rule\n", len(outboundIPs))
+
+	// Find the NSG in the etcd resource group
+	nsgClient, err := armnetwork.NewSecurityGroupsClient(etcdSubscription, cred, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create NSG client: %w", err)
+	}
+
+	var etcdNSGName string
+	pager := nsgClient.NewListPager(args.EtcdResourceGroup, nil)
+	for pager.More() {
+		page, err := pager.NextPage(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to list NSGs in etcd resource group: %w", err)
+		}
+		for _, nsg := range page.Value {
+			if nsg.Name != nil {
+				etcdNSGName = *nsg.Name
+				break
+			}
+		}
+		if etcdNSGName != "" {
+			break
+		}
+	}
+
+	if etcdNSGName == "" {
+		return fmt.Errorf("no NSG found in etcd resource group %s", args.EtcdResourceGroup)
+	}
+
+	fmt.Printf("Found etcd NSG: %s, adding rule for cluster outbound IPs...\n", etcdNSGName)
+
+	// Add NSG rule allowing cluster outbound IPs to etcd port 2379
+	securityRulesClient, err := armnetwork.NewSecurityRulesClient(etcdSubscription, cred, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create security rules client: %w", err)
+	}
+
+	ruleName := fmt.Sprintf("Allow-%s-etcd", args.Cluster)
+	sourceAddresses := make([]*string, len(outboundIPs))
+	for i, ip := range outboundIPs {
+		sourceAddresses[i] = &ip
+	}
+
+	rule := armnetwork.SecurityRule{
+		Name: &ruleName,
+		Properties: &armnetwork.SecurityRulePropertiesFormat{
+			Priority:                 to.Ptr[int32](300),
+			Direction:                to.Ptr(armnetwork.SecurityRuleDirectionInbound),
+			Access:                   to.Ptr(armnetwork.SecurityRuleAccessAllow),
+			Protocol:                 to.Ptr(armnetwork.SecurityRuleProtocolTCP),
+			SourceAddressPrefixes:    sourceAddresses,
+			SourcePortRange:          to.Ptr("*"),
+			DestinationAddressPrefix: to.Ptr("*"),
+			DestinationPortRange:     to.Ptr("2379"),
+		},
+	}
+
+	poller, err := securityRulesClient.BeginCreateOrUpdate(ctx, args.EtcdResourceGroup, etcdNSGName, ruleName, rule, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create etcd NSG rule: %w", err)
+	}
+	_, err = poller.PollUntilDone(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("failed to complete etcd NSG rule creation: %w", err)
+	}
+
+	fmt.Printf("Etcd NSG rule '%s' added successfully\n", ruleName)
 	return nil
 }
